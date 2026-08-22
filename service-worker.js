@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ai-chat-v7-local-provider-proxy';
+const CACHE_NAME = 'ai-chat-v8-local-provider-proxy';
 
 const STATIC_ASSETS = [
   '/',
@@ -74,10 +74,11 @@ const LOCAL_PROVIDER_PATCH = `
   const normalizeDictionaryResult = (rawText) => {
     const tryParse = (value) => {
       if (!value) return null;
+      const fence = String.fromCharCode(96);
       const normalized = value.toString().trim()
         .replace(/^\\uFEFF/, '')
-        .replace(/^```(?:json)?\\s*/i, '')
-        .replace(/\\s*```\\s*$/i, '')
+        .replace(new RegExp('^' + fence + '{3}(?:json)?\\\\s*', 'i'), '')
+        .replace(new RegExp('\\\\s*' + fence + '{3}$', 'i'), '')
         .replace(/,(\\s*[}\\]])/g, '$1');
       try { return JSON.parse(normalized); } catch (_) { return null; }
     };
