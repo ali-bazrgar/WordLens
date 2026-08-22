@@ -15,7 +15,8 @@ class WordLensHandler(SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def end_headers(self):
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -33,12 +34,7 @@ class WordLensHandler(SimpleHTTPRequestHandler):
             if value:
                 headers[name] = value
 
-        request = Request(
-            upstream_url,
-            data=body,
-            headers=headers,
-            method=self.command,
-        )
+        request = Request(upstream_url, data=body, headers=headers, method=self.command)
 
         try:
             with urlopen(request, timeout=300) as response:
@@ -59,43 +55,61 @@ class WordLensHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
         except (URLError, TimeoutError, OSError) as exc:
-            payload = json.dumps({
-                "error": {
-                    "message": f"Local upstream unavailable: {exc}"
-                }
-            }).encode("utf-8")
+            payload = json.dumps({"error": {"message": f"Local upstream unavailable: {exc}"}}).encode("utf-8")
             self.send_response(502)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
 
+    def _serve_app_js(self):
+        app_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.js")
+        runtime_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local-provider-runtime.js")
+        try:
+            with open(app_path, "r", encoding="utf-8") as app_file:
+                source = app_file.read()
+            with open(runtime_path, "r", encoding="utf-8") as runtime_file:
+                runtime = runtime_file.read()
+            payload = (source + "\n\n/* --- Local Provider 3 runtime --- */\n" + runtime + "\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            self.wfile.write(payload)
+        except OSError as exc:
+            payload = json.dumps({"error": {"message": f"Failed to serve app.js: {exc}"}}).encode("utf-8")
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
     def do_GET(self):
-        if self.path == "/local-api/models":
+        clean_path = self.path.split("?", 1)[0]
+
+        if clean_path == "/app.js":
+            self._serve_app_js()
+            return
+
+        if clean_path == "/local-api/models":
             self._proxy(f"{LLM_BASE}/v1/models")
             return
 
-        if self.path == "/local-api/health":
+        if clean_path == "/local-api/health":
             try:
                 with urlopen(f"{LLM_BASE}/v1/models", timeout=10) as llm_response:
                     llm_data = json.loads(llm_response.read().decode("utf-8"))
                 with urlopen(f"{TTS_BASE}/health", timeout=10) as tts_response:
                     tts_data = json.loads(tts_response.read().decode("utf-8"))
-                payload = json.dumps({
-                    "status": "ok",
-                    "llm": llm_data,
-                    "tts": tts_data,
-                }).encode("utf-8")
+                payload = json.dumps({"status": "ok", "llm": llm_data, "tts": tts_data}).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
             except Exception as exc:
-                payload = json.dumps({
-                    "status": "error",
-                    "message": str(exc),
-                }).encode("utf-8")
+                payload = json.dumps({"status": "error", "message": str(exc)}).encode("utf-8")
                 self.send_response(502)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload)))
@@ -108,12 +122,13 @@ class WordLensHandler(SimpleHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(content_length) if content_length else b""
+        clean_path = self.path.split("?", 1)[0]
 
-        if self.path == "/local-api/chat/completions":
+        if clean_path == "/local-api/chat/completions":
             self._proxy(f"{LLM_BASE}/v1/chat/completions", body)
             return
 
-        if self.path == "/local-api/audio/speech":
+        if clean_path == "/local-api/audio/speech":
             self._proxy(f"{TTS_BASE}/v1/audio/speech", body)
             return
 
