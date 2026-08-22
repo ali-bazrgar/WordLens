@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ai-chat-v6-local-provider-proxy';
+const CACHE_NAME = 'ai-chat-v7-local-provider-proxy';
 
 const STATIC_ASSETS = [
   '/',
@@ -141,6 +141,12 @@ const LOCAL_PROVIDER_PATCH = `
       return content;
     };
 
+    AIChatApp.prototype.translateText = async function(text) {
+      if (this.chatProvider === 'avalai' && this.AVALAI_API_KEY) return this.translateTextAvalai(text);
+      if (this.chatProvider === 'openrouter') return this.translateTextOpenRouter(text);
+      return this.translateTextGemini(text);
+    };
+
     AIChatApp.prototype.translateTextOpenRouter = async function(text) {
       const prompt = 'Translate this text to Persian/Farsi. Provide only the translation without any additional explanation: "' + text + '"';
       try {
@@ -177,18 +183,35 @@ const LOCAL_PROVIDER_PATCH = `
       }
     };
 
-    AIChatApp.prototype.playWithElevenLabsTTS = async function(text, button, progressBar) {
-      button.disabled = true;
-      button.classList.add('playing');
-      if (progressBar) this.updateProgress(progressBar, 0);
+    const originalPlayTextToSpeech = AIChatApp.prototype.playTextToSpeech;
+    AIChatApp.prototype.playTextToSpeech = async function(text, button, progressBar, messageId) {
+      if (!tts3Enabled(this)) return originalPlayTextToSpeech.call(this, text, button, progressBar, messageId);
+      if (speechSynthesis.speaking) {
+        speechSynthesis.cancel();
+        return;
+      }
+      try {
+        const cachedAudio = await this.db.get('audio_cache', text);
+        if (cachedAudio && cachedAudio.value) {
+          await this.playAudio(cachedAudio.value, button, progressBar);
+          return;
+        }
+      } catch (error) {
+        console.error('Local TTS cache error:', error);
+      }
+      if (button) {
+        button.disabled = true;
+        button.classList.add('playing');
+      }
       try {
         const audioBlob = await localTTS(text);
         await this.playAudio(audioBlob, button, progressBar);
         await this.db.set('audio_cache', { text: text, value: audioBlob }).catch(() => {});
       } catch (error) {
-        console.error('Local Provider 3 TTS Error:', error);
-        button.classList.remove('playing');
-        button.disabled = false;
+        if (button) {
+          button.classList.remove('playing');
+          button.disabled = false;
+        }
         if (progressBar) this.updateProgress(progressBar, 0);
         this.showToast('Failed to generate speech with Local Provider 3: ' + error.message, 'error');
       }
@@ -196,6 +219,22 @@ const LOCAL_PROVIDER_PATCH = `
   }
 
   if (typeof AdvancedTTSPlayer !== 'undefined') {
+    const originalGenerateFullAudio = AdvancedTTSPlayer.prototype.generateFullAudio;
+    AdvancedTTSPlayer.prototype.generateFullAudio = async function(text) {
+      if (!tts3Enabled(this.app)) return originalGenerateFullAudio.call(this, text);
+      try {
+        const cacheKey = 'full_' + text;
+        const cachedAudio = await this.app.db.get('audio_cache', cacheKey);
+        if (cachedAudio && cachedAudio.value) return cachedAudio.value;
+        const audioBlob = await localTTS(text);
+        if (audioBlob) await this.app.db.set('audio_cache', { text: cacheKey, value: audioBlob }).catch(() => {});
+        return audioBlob;
+      } catch (error) {
+        console.error('Local Provider 3 advanced TTS error:', error);
+        return null;
+      }
+    };
+
     AdvancedTTSPlayer.prototype.generateElevenLabsTTS = async function(text) {
       return await localTTS(text);
     };
