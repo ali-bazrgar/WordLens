@@ -1,11 +1,4 @@
-const CACHE_NAME = 'ai-chat-v5-local-provider-proxy';
-const LOCAL_DEFAULTS = {
-  llmBase: '/local-api',
-  llmModel: 'Hy-MT2-1.8B-2Bit',
-  ttsBase: '/local-api',
-  ttsApiKey: '123',
-  ttsVoice: 'expr-voice-4-m'
-};
+const CACHE_NAME = 'ai-chat-v6-local-provider-proxy';
 
 const STATIC_ASSETS = [
   '/',
@@ -16,9 +9,7 @@ const STATIC_ASSETS = [
 ];
 
 const LOCAL_PROVIDER_PATCH = `
-/* WordLens Local Provider 3 patch.
- * Loaded after the original app.js so existing providers and data logic remain intact.
- */
+/* WordLens Local Provider 3 patch. */
 (() => {
   const defaults = {
     llmBase: '/local-api',
@@ -36,18 +27,14 @@ const LOCAL_PROVIDER_PATCH = `
   const localCompletion = async (messages, extra = {}) => {
     const base = getCfg('llmBase').replace(/\\/$/, '');
     const model = getCfg('llmModel') || defaults.llmModel;
-    const response = await fetch(`${base}/chat/completions`, {
+    const response = await fetch(base + '/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages,
-        ...extra
-      })
+      body: JSON.stringify(Object.assign({ model, messages }, extra))
     });
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Local Provider 3 API Error: ${response.status}, ${errorText}`);
+      throw new Error('Local Provider 3 API Error: ' + response.status + ', ' + errorText);
     }
     const data = await response.json();
     return data.choices?.[0]?.message?.content || '';
@@ -55,10 +42,10 @@ const LOCAL_PROVIDER_PATCH = `
 
   const localTTS = async (text) => {
     const base = getCfg('ttsBase').replace(/\\/$/, '');
-    const response = await fetch(`${base}/audio/speech`, {
+    const response = await fetch(base + '/audio/speech', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${getCfg('ttsApiKey') || defaults.ttsApiKey}`,
+        'Authorization': 'Bearer ' + (getCfg('ttsApiKey') || defaults.ttsApiKey),
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -70,7 +57,7 @@ const LOCAL_PROVIDER_PATCH = `
     });
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Local TTS API Error: ${response.status}, ${errorText}`);
+      throw new Error('Local TTS API Error: ' + response.status + ', ' + errorText);
     }
     return await response.blob();
   };
@@ -81,10 +68,7 @@ const LOCAL_PROVIDER_PATCH = `
     return chat.messages
       .filter(msg => msg.role !== 'system')
       .slice(-10)
-      .map(msg => ({
-        role: msg.role === 'user' ? 'user' : 'assistant',
-        content: msg.content
-      }));
+      .map(msg => ({ role: msg.role === 'user' ? 'user' : 'assistant', content: msg.content }));
   };
 
   const normalizeDictionaryResult = (rawText) => {
@@ -97,38 +81,27 @@ const LOCAL_PROVIDER_PATCH = `
         .replace(/,(\\s*[}\\]])/g, '$1');
       try { return JSON.parse(normalized); } catch (_) { return null; }
     };
-
     const extract = (value) => {
       if (!value) return null;
       const start = value.indexOf('{');
       const end = value.lastIndexOf('}');
       return (start >= 0 && end > start) ? value.slice(start, end + 1) : null;
     };
-
     const hasArabic = (s) => /[\\u0600-\\u06FF]/.test(s);
     const normalizeList = (value) => {
-      const list = Array.isArray(value)
-        ? value
-        : (typeof value === 'string' ? value.split(/[,\\n]/g) : []);
+      const list = Array.isArray(value) ? value : (typeof value === 'string' ? value.split(/[,\\n]/g) : []);
       return list.map(v => (v ?? '').toString().trim())
         .filter(Boolean)
         .map(v => v.replace(/^["'\\s]+|["'\\s]+$/g, ''))
         .filter(v => /[A-Za-z]/.test(v) && !hasArabic(v));
     };
-
     const parsed = tryParse(rawText) || tryParse(extract(rawText));
     if (!parsed || !Array.isArray(parsed.meanings)) return null;
-
     const meanings = parsed.meanings
       .map(m => ({ text: (m?.text ?? '').toString().trim(), type: (m?.type ?? '').toString().trim() }))
       .filter(m => m.text);
     if (!meanings.length) return null;
-
-    return {
-      meanings,
-      synonyms: normalizeList(parsed.synonyms),
-      antonyms: normalizeList(parsed.antonyms)
-    };
+    return { meanings, synonyms: normalizeList(parsed.synonyms), antonyms: normalizeList(parsed.antonyms) };
   };
 
   const saveLocalSettings = () => {
@@ -139,51 +112,37 @@ const LOCAL_PROVIDER_PATCH = `
       ttsApiKey: document.getElementById('local-tts-api-key'),
       ttsVoice: document.getElementById('local-tts-voice')
     };
-    Object.entries(fields).forEach(([key, element]) => {
-      if (element) setCfg(key, element.value);
-    });
+    Object.entries(fields).forEach(([key, element]) => { if (element) setCfg(key, element.value); });
   };
 
-  // Persist the current local-provider values while preserving the application's original settings logic.
   if (typeof AIChatApp !== 'undefined') {
     const originalShowSettings = AIChatApp.prototype.showSettingsModal;
     AIChatApp.prototype.showSettingsModal = function() {
       originalShowSettings.call(this);
-      const setValue = (id, key) => {
-        const el = document.getElementById(id);
-        if (el) el.value = getCfg(key);
-      };
-      setValue('local-llm-base-url', 'llmBase');
-      setValue('local-llm-model', 'llmModel');
-      setValue('local-tts-base-url', 'ttsBase');
-      setValue('local-tts-api-key', 'ttsApiKey');
-      setValue('local-tts-voice', 'ttsVoice');
+      const fill = (id, key) => { const el = document.getElementById(id); if (el) el.value = getCfg(key); };
+      fill('local-llm-base-url', 'llmBase');
+      fill('local-llm-model', 'llmModel');
+      fill('local-tts-base-url', 'ttsBase');
+      fill('local-tts-api-key', 'ttsApiKey');
+      fill('local-tts-voice', 'ttsVoice');
     };
 
     const originalSaveSettings = AIChatApp.prototype.saveSettings;
     AIChatApp.prototype.saveSettings = function() {
       saveLocalSettings();
       originalSaveSettings.call(this);
-      // Provider 3 is intentionally the local provider in this version.
-      if (this.chatProvider === 'openrouter') {
-        this.showToast('Provider 3: Local LLM settings saved.', 'success');
-      }
-      if (this.ttsProvider === 'elevenlabs') {
-        this.showToast('Provider 3: Local TTS settings saved.', 'success');
-      }
     };
 
     AIChatApp.prototype.callOpenRouterChatAPI = async function(message) {
       if (!provider3Enabled(this)) throw new Error('Provider 3 is not selected.');
       const history = getHistory(this);
-      const content = await localCompletion([...history, { role: 'user', content: message }]);
+      const content = await localCompletion(history.concat([{ role: 'user', content: message }]));
       if (!content) throw new Error('Local Provider 3 returned an empty response.');
       return content;
     };
 
     AIChatApp.prototype.translateTextOpenRouter = async function(text) {
-      if (!provider3Enabled(this)) return 'Provider 3 is not selected.';
-      const prompt = `Translate this text to Persian/Farsi. Provide only the translation without any additional explanation: "${text}"`;
+      const prompt = 'Translate this text to Persian/Farsi. Provide only the translation without any additional explanation: "' + text + '"';
       try {
         return await localCompletion([{ role: 'user', content: prompt }], { temperature: 0.2 });
       } catch (error) {
@@ -201,14 +160,10 @@ const LOCAL_PROVIDER_PATCH = `
         console.error('Local dictionary cache error:', error);
       }
 
-      const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
-Return ONLY valid JSON with this exact structure:
-{
-  "meanings": [{"text":"Persian meaning","type":"Persian part of speech"}],
-  "synonyms": ["English word"],
-  "antonyms": ["English word"]
-}
-Requirements: meanings in Persian/Farsi; synonyms and antonyms in English only; no markdown; provide several common meanings and useful synonyms/antonyms.`;
+      const prompt = 'You are an expert English-Persian dictionary. Analyze the word "' + word + '" comprehensively.\\n' +
+        'Return ONLY valid JSON with this exact structure:\\n' +
+        '{"meanings":[{"text":"Persian meaning","type":"Persian part of speech"}],"synonyms":["English word"],"antonyms":["English word"]}\\n' +
+        'Requirements: meanings in Persian/Farsi; synonyms and antonyms in English only; no markdown; provide several common meanings and useful synonyms/antonyms.';
 
       try {
         const raw = await localCompletion([{ role: 'user', content: prompt }], { temperature: 0.2 });
@@ -218,7 +173,7 @@ Requirements: meanings in Persian/Farsi; synonyms and antonyms in English only; 
         return result;
       } catch (error) {
         console.error('Local Provider 3 dictionary error:', error);
-        return { meanings: [{ text: `Local Provider 3 error: ${error.message}`, type: 'Error' }], synonyms: [], antonyms: [] };
+        return { meanings: [{ text: 'Local Provider 3 error: ' + error.message, type: 'Error' }], synonyms: [], antonyms: [] };
       }
     };
 
@@ -229,49 +184,52 @@ Requirements: meanings in Persian/Farsi; synonyms and antonyms in English only; 
       try {
         const audioBlob = await localTTS(text);
         await this.playAudio(audioBlob, button, progressBar);
-        await this.db.set('audio_cache', { text, value: audioBlob }).catch(() => {});
+        await this.db.set('audio_cache', { text: text, value: audioBlob }).catch(() => {});
       } catch (error) {
         console.error('Local Provider 3 TTS Error:', error);
         button.classList.remove('playing');
         button.disabled = false;
         if (progressBar) this.updateProgress(progressBar, 0);
-        this.showToast(`Failed to generate speech with Local Provider 3: ${error.message}`, 'error');
+        this.showToast('Failed to generate speech with Local Provider 3: ' + error.message, 'error');
       }
     };
   }
 
   if (typeof AdvancedTTSPlayer !== 'undefined') {
-    const originalGenerateEleven = AdvancedTTSPlayer.prototype.generateElevenLabsTTS;
     AdvancedTTSPlayer.prototype.generateElevenLabsTTS = async function(text) {
-      try {
-        return await localTTS(text);
-      } catch (error) {
-        console.error('Local Provider 3 advanced TTS error:', error);
-        // Keep the original provider path available only if the user changes the implementation later.
-        throw error;
-      }
+      return await localTTS(text);
     };
   }
 
-  // Change Provider 3 labels while preserving the original internal value for backwards compatibility.
   window.addEventListener('DOMContentLoaded', () => {
     const chatOption = document.querySelector('#chat-provider-select option[value="openrouter"]');
     if (chatOption) chatOption.textContent = 'Provider 3 — Local LLM';
     const ttsOption = document.querySelector('#tts-provider-select option[value="elevenlabs"]');
     if (ttsOption) ttsOption.textContent = 'Provider 3 — Local TTS';
-  }, { once: true });
 
-  console.log('[WordLens] Local Provider 3 patch loaded:', {
-    llm: `${getCfg('llmBase')}/${getCfg('llmModel')}`,
-    tts: `${getCfg('ttsBase')} (${getCfg('ttsVoice')})`
-  });
+    const testButton = document.getElementById('local-provider-test');
+    const status = document.getElementById('local-provider-status');
+    if (testButton) {
+      testButton.addEventListener('click', async () => {
+        if (status) status.textContent = 'Testing...';
+        try {
+          const health = await fetch('/local-api/health', { cache: 'no-store' });
+          const data = await health.json();
+          if (!health.ok || data.status !== 'ok') throw new Error(data.message || 'Local services are unavailable.');
+          if (status) status.textContent = 'OK — Local LLM and TTS are reachable.';
+        } catch (error) {
+          if (status) status.textContent = 'Error: ' + error.message;
+        }
+      });
+    }
+  }, { once: true });
 })();
 `;
 
 const LOCAL_SETTINGS_HTML = `
 <div class="setting-section" id="local-provider-settings">
   <p><b>Provider 3 — Local</b></p>
-  <small style="color:#666;display:block;margin-bottom:8px;">Provider 3 uses your local llama.cpp LLM and KittenTTS through the WordLens local proxy. No OpenRouter API key is required.</small>
+  <small style="color:#666;display:block;margin-bottom:8px;">LLM and TTS run locally. No OpenRouter or ElevenLabs key is used for Provider 3.</small>
   <label style="display:block;margin:6px 0 4px;">Local LLM Base URL</label>
   <input type="text" id="local-llm-base-url" placeholder="/local-api" value="/local-api">
   <label style="display:block;margin:8px 0 4px;">Local LLM Model</label>
@@ -287,16 +245,9 @@ const LOCAL_SETTINGS_HTML = `
 </div>`;
 
 function injectLocalSettings(html) {
-  if (!html.includes('id="local-provider-settings"')) {
-    const marker = '<div class="setting-section">\n          <p>Text-to-Speech Provider:</p>';
-    html = html.replace(marker, LOCAL_SETTINGS_HTML + '\n        ' + marker);
-  }
-  return html;
-}
-
-function injectLocalAppScript(html) {
-  // app.js is still the original file; the service worker patches it before it reaches the browser.
-  return html;
+  if (html.includes('id="local-provider-settings"')) return html;
+  const marker = '<div class="setting-section">\\n          <p>Text-to-Speech Provider:</p>';
+  return html.replace(marker, LOCAL_SETTINGS_HTML + '\\n        ' + marker);
 }
 
 self.addEventListener('install', event => {
@@ -322,8 +273,7 @@ self.addEventListener('fetch', event => {
     event.respondWith((async () => {
       const response = await fetch(event.request, { cache: 'no-store' });
       const text = await response.text();
-      const injected = injectLocalSettings(text);
-      return new Response(injected, {
+      return new Response(injectLocalSettings(text), {
         status: response.status,
         statusText: response.statusText,
         headers: new Headers(response.headers)
@@ -336,7 +286,7 @@ self.addEventListener('fetch', event => {
     event.respondWith((async () => {
       const response = await fetch(event.request, { cache: 'no-store' });
       const source = await response.text();
-      const patched = `${source}\n\n${LOCAL_PROVIDER_PATCH}\n`;
+      const patched = source + '\\n\\n' + LOCAL_PROVIDER_PATCH + '\\n';
       return new Response(patched, {
         status: response.status,
         statusText: response.statusText,
@@ -349,7 +299,6 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Never rewrite local proxy requests. The WordLens server handles these same-origin.
   event.respondWith((async () => {
     const cached = await caches.match(event.request);
     if (cached) return cached;
