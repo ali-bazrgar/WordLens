@@ -49,7 +49,7 @@
       },
       body: JSON.stringify({
         model: 'kitten-tts-mini-0.8',
-        input: text,
+        input: String(text ?? ''),
         voice: getCfg('ttsVoice') || DEFAULTS.ttsVoice,
         response_format: 'wav'
       })
@@ -58,7 +58,61 @@
       const errorText = await response.text();
       throw new Error(`Local TTS API Error: ${response.status}, ${errorText}`);
     }
-    return response.blob();
+    const blob = await response.blob();
+    if (!blob.size) throw new Error('Local TTS returned an empty audio file.');
+    return blob;
+  };
+
+  const playLocalBlob = async (app, audioBlob, button, progressBar) => {
+    if (!audioBlob || !audioBlob.size) throw new Error('Empty local audio blob.');
+
+    const audioUrl = URL.createObjectURL(audioBlob);
+    const audio = new Audio(audioUrl);
+
+    if (button) {
+      button.disabled = true;
+      button.classList.add('playing');
+    }
+    if (progressBar && app?.updateProgress) app.updateProgress(progressBar, 0);
+
+    await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        URL.revokeObjectURL(audioUrl);
+        if (button) {
+          button.disabled = false;
+          button.classList.remove('playing');
+        }
+      };
+
+      audio.addEventListener('loadedmetadata', () => {
+        if (progressBar && app?.updateProgress && Number.isFinite(audio.duration) && audio.duration > 0) {
+          app.updateProgress(progressBar, 0);
+        }
+      }, { once: true });
+
+      audio.addEventListener('timeupdate', () => {
+        if (progressBar && app?.updateProgress && audio.duration > 0) {
+          app.updateProgress(progressBar, (audio.currentTime / audio.duration) * 100);
+        }
+      });
+
+      audio.addEventListener('ended', () => {
+        cleanup();
+        if (progressBar && app?.updateProgress) app.updateProgress(progressBar, 100);
+        resolve();
+      }, { once: true });
+
+      audio.addEventListener('error', () => {
+        const detail = audio.error ? `code=${audio.error.code}` : 'unknown audio error';
+        cleanup();
+        reject(new Error(`Browser could not play local WAV (${detail}).`));
+      }, { once: true });
+
+      audio.play().catch((err) => {
+        cleanup();
+        reject(err);
+      });
+    });
   };
 
   const injectLocalSettings = () => {
@@ -99,17 +153,26 @@
       const status = document.getElementById('local-provider-status');
       status.textContent = 'Testing...';
       try {
-        const response = await fetch(`${normalizeBase(getCfg('llmBase') || DEFAULTS.llmBase)}/models`, { cache: 'no-store' });
-        if (!response.ok) throw new Error(`LLM endpoint returned ${response.status}`);
-        const data = await response.json();
-        if (!Array.isArray(data?.data)) throw new Error('Invalid LLM response.');
-        await fetch(`${normalizeBase(getCfg('ttsBase') || DEFAULTS.ttsBase)}/health`, { cache: 'no-store' }).then(async (r) => {
-          if (!r.ok) throw new Error(`TTS health returned ${r.status}`);
-          return r.json();
-        });
-        status.textContent = 'OK — Local LLM and TTS are reachable.';
+        const llmResponse = await fetch(`${normalizeBase(getCfg('llmBase') || DEFAULTS.llmBase)}/models`, { cache: 'no-store' });
+        if (!llmResponse.ok) throw new Error(`LLM endpoint returned ${llmResponse.status}`);
+        const llmData = await llmResponse.json();
+        if (!Array.isArray(llmData?.data)) throw new Error('Invalid LLM response.');
+
+        const ttsResponse = await fetch(`${normalizeBase(getCfg('ttsBase') || DEFAULTS.ttsBase)}/health`, { cache: 'no-store' });
+        if (!ttsResponse.ok) throw new Error(`TTS health returned ${ttsResponse.status}`);
+        const ttsData = await ttsResponse.json();
+        if (ttsData?.status !== 'ok' || ttsData?.model_loaded !== true) {
+          throw new Error(ttsData?.load_error || 'TTS model is not loaded.');
+        }
+
+        // Test actual synthesis, not only /health.
+        const sample = await localTTS('Hello, this is a local text to speech test.');
+        if (!(sample instanceof Blob) || sample.size === 0) throw new Error('TTS synthesis returned no audio.');
+
+        status.textContent = `OK — Local LLM and TTS synthesis are working (${Math.round(sample.size / 1024)} KB WAV).`;
       } catch (error) {
         status.textContent = `Error: ${error.message}`;
+        console.error('Local Provider 3 test failed:', error);
       }
     });
   };
@@ -196,6 +259,22 @@
       }
     };
 
+    // The original app only routes to ElevenLabs when an ElevenLabs API key
+    // exists. Provider 3 Local must bypass that unrelated requirement.
+    const originalPlayTextToSpeech = AIChatApp.prototype.playTextToSpeech;
+    AIChatApp.prototype.playTextToSpeech = async function(text, button, progressBar, messageId) {
+      if (this.ttsProvider === 'elevenlabs') {
+        try {
+          await this.playWithElevenLabsTTS(text, button, progressBar);
+        } catch (error) {
+          console.error('Local Provider 3 TTS routing error:', error);
+          this.showToast(`Local TTS failed: ${error.message}`, 'error');
+        }
+        return;
+      }
+      return originalPlayTextToSpeech.call(this, text, button, progressBar, messageId);
+    };
+
     AIChatApp.prototype.playWithElevenLabsTTS = async function(text, button, progressBar) {
       if (!button) return;
       button.disabled = true;
@@ -203,7 +282,7 @@
       if (progressBar) this.updateProgress(progressBar, 0);
       try {
         const audioBlob = await localTTS(text);
-        await this.playAudio(audioBlob, button, progressBar);
+        await playLocalBlob(this, audioBlob, button, progressBar);
         await this.db.set('audio_cache', { text, value: audioBlob }).catch(() => {});
       } catch (error) {
         console.error('Local Provider 3 TTS Error:', error);
@@ -216,6 +295,30 @@
   }
 
   if (typeof AdvancedTTSPlayer !== 'undefined') {
+    // Advanced player previously required an ElevenLabs API key before it
+    // called generateElevenLabsTTS(). Replace that branch for local Provider 3.
+    const originalAdvancedPlayTextToSpeech = AdvancedTTSPlayer.prototype.playTextToSpeech;
+    if (typeof originalAdvancedPlayTextToSpeech === 'function') {
+      AdvancedTTSPlayer.prototype.playTextToSpeech = async function(text, button, progressBar, messageId) {
+        if (this.app?.ttsProvider === 'elevenlabs') {
+          try {
+            const audioBlob = await localTTS(text);
+            await playLocalBlob(this.app, audioBlob, button, progressBar);
+            await this.app.db.set('audio_cache', { text, value: audioBlob }).catch(() => {});
+          } catch (error) {
+            console.error('Local Provider 3 Advanced TTS Error:', error);
+            if (button) {
+              button.classList.remove('playing');
+              button.disabled = false;
+            }
+            this.app.showToast(`Failed to generate speech with Local Provider 3: ${error.message}`, 'error');
+          }
+          return;
+        }
+        return originalAdvancedPlayTextToSpeech.call(this, text, button, progressBar, messageId);
+      };
+    }
+
     AdvancedTTSPlayer.prototype.generateElevenLabsTTS = async function(text) {
       return localTTS(text);
     };
