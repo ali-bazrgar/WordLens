@@ -176,29 +176,31 @@ class WordLensHandler(SimpleHTTPRequestHandler):
                 connection.close()
 
         self.close_connection = True
+
+        def downstream_disconnected():
+            try:
+                readable, _, exceptional = select.select([self.connection], [], [self.connection], 0)
+                if exceptional:
+                    return True
+                if readable:
+                    return self.connection.recv(1, socket.MSG_PEEK) == b""
+                return False
+            except (OSError, ValueError):
+                return True
+
         worker = threading.Thread(target=fetch_upstream, name="wordlens-api-proxy", daemon=True)
         worker.start()
         headers_sent = False
         try:
             while True:
+                # Check on every iteration, including while response chunks are
+                # queued, so a fast producer can't hide a browser cancellation.
+                if downstream_disconnected():
+                    connection.close()
+                    return
                 try:
                     kind, value, *extra = events.get(timeout=0.1)
                 except queue.Empty:
-                    # Detect a cancelled browser fetch even if the upstream
-                    # model is still thinking and hasn't sent its next token.
-                    try:
-                        readable, _, exceptional = select.select([self.connection], [], [self.connection], 0)
-                        if exceptional:
-                            connection.close()
-                            return
-                        if readable:
-                            peek = self.connection.recv(1, socket.MSG_PEEK)
-                            if not peek:
-                                connection.close()
-                                return
-                    except (OSError, ValueError):
-                        connection.close()
-                        return
                     continue
 
                 if kind == "headers":
