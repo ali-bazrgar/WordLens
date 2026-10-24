@@ -1,7 +1,7 @@
 {
-  "name": "AI Chat App",
-  "short_name": "AI Chat",
-  "description": "Chat with AI",
+  "name": "WordLens",
+  "short_name": "WordLens",
+  "description": "Offline-first vocabulary, translation and flashcard learning",
   "start_url": "./",
   "display": "standalone",
   "scope": "./",
