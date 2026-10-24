@@ -3939,10 +3939,8 @@ Be thorough and comprehensive.`;
 
     await this.db.set(this.LEITNER_STORE, updatedCard);
     await this.refreshLeitnerDueCacheForWord(updatedCard.word, this.currentLeitnerScope);
-    if (result.interval === 0) {
-      const insertPosition = Math.min(this.leitnerQueue.length, Math.floor(Math.random() * 3) + 3);
-      this.leitnerQueue.splice(insertPosition, 0, updatedCard);
-    }
+    // Again is due in ten minutes; do not put it back into this queue immediately.
+    // openLeitnerModal uses the exact timestamp, so it will reappear when genuinely due.
     this.showNextCard();
   }
 
