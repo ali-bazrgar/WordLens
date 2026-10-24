@@ -24,7 +24,7 @@ For local `whisper.cpp`, WordLens converts browser microphone audio to 16 kHz mo
 
 ### Pocket TTS compatibility
 
-WordLens now defaults Provider 3 to model `pocket-tts` and voice `clone`. It tries the OpenAI-compatible `/v1/audio/speech` endpoint first. If the endpoint is unavailable or rejects that request format, it retries the native Kyutai Pocket TTS `/tts` endpoint using multipart form data. The native endpoint uses the voice configured as the Pocket TTS server's default; set that default to your cloned voice. The API key is blank by default for local servers. Legacy defaults (`4321`, `kitten-tts-mini-0.8`, and the previous voice) are migrated automatically.
+WordLens now defaults Provider 3 to model `pocket-tts` and voice `clone`. It tries the OpenAI-compatible `/v1/audio/speech` endpoint first. If the endpoint is unavailable or rejects that request format, it retries the native Kyutai Pocket TTS `/tts` endpoint using multipart form data. The native endpoint uses the voice configured as the Pocket TTS server's default; set that default to your cloned voice. The API key is blank by default for local servers. Legacy defaults (`4321`, `kitten-tts-mini-0.8`, the previous voice, and the former first-provider startup defaults) are migrated automatically; explicitly selected Provider 2 or Provider 3 preferences are preserved.
 
 ## Direct API mode
 
