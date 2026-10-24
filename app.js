@@ -1087,11 +1087,13 @@ class AIChatApp {
     const easeFactor = clamp(Number(card?.easeFactor) || 2.5, 1.3, 2.5);
     const legacyDifficulty = clamp(10 - ((easeFactor - 1.3) / 1.2) * 9, 1, 10);
     const legacyStatus = String(card?.status || "").toLowerCase();
+    const legacyLearning = legacyStatus === "learning" || legacyStatus === "relearning";
+    const hasPriorMemory = reps > 0 || legacyLearning;
     return {
       version: 6,
-      stability: reps > 0 ? Math.max(0.1, interval || 1) : 0,
-      difficulty: reps > 0 ? legacyDifficulty : 5,
-      state: reps > 0 ? (legacyStatus === "learning" || legacyStatus === "relearning" ? legacyStatus : "review") : "new",
+      stability: hasPriorMemory ? Math.max(0.1, interval || 1) : 0,
+      difficulty: hasPriorMemory ? legacyDifficulty : 5,
+      state: legacyLearning ? legacyStatus : (reps > 0 ? "review" : "new"),
       reps,
       lapses: 0,
       lastReview: inferredLastReview,
@@ -3336,10 +3338,8 @@ Be thorough and comprehensive.`;
         antonymsEl.replaceChildren();
       }
       try {
-        if (forceRefresh) {
-          // Delete the old entry first, then bypass every provider cache as a second guard.
-          await this.db.delete("word_meanings", wordKey);
-        }
+        // Force refresh bypasses provider caches. A successful response overwrites IndexedDB;
+        // if the model fails, keep the last-known-good database entry while showing the error.
         const result = await this.getWordMeaning(word, { forceRefresh: !!forceRefresh });
         if (requestId === activeRequest && popup.isConnected) renderMeaningData(result);
       } catch (error) {
