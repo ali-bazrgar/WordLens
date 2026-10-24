@@ -1328,7 +1328,7 @@
           ...(requirePersian ? ['Every meanings[].text must be a Persian translation in Persian script; English definitions are invalid.'] : []),
           ...(requireRelatedTerms ? ['Prioritize useful synonyms and meaningful antonyms; keep those lists in English.'] : []),
           ...(forceRefresh ? ['Reassess independently; accuracy matters more than novelty. Previous result for comparison only: ' + JSON.stringify(previousCachedResult || null)] : [])
-        ].join('\n');        ].join('\n');
+        ].join('\n');
 
         const jsonOptions = {
           temperature: forceRefresh ? 0.7 : 0,
