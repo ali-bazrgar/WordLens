@@ -664,8 +664,43 @@
   }
 
   if (typeof AdvancedTTSPlayer !== 'undefined') {
-    // Advanced player previously required an ElevenLabs API key before it
-    // called generateElevenLabsTTS(). Replace that branch for local Provider 3.
+    // The speaker button below chat messages and document pages uses
+    // AdvancedTTSPlayer.generateFullAudio(), not AIChatApp.playTextToSpeech().
+    // The original method checks for a cloud API key and silently returns null,
+    // which made local Pocket TTS fail even when the service was reachable.
+    const originalAdvancedGenerateFullAudio = AdvancedTTSPlayer.prototype.generateFullAudio;
+    if (typeof originalAdvancedGenerateFullAudio === 'function') {
+      AdvancedTTSPlayer.prototype.generateFullAudio = async function(text) {
+        if (this.app?.ttsProvider !== 'elevenlabs') {
+          return originalAdvancedGenerateFullAudio.call(this, text);
+        }
+
+        const model = getCfg('ttsModel') || DEFAULTS.ttsModel;
+        const voice = getCfg('ttsVoice') || DEFAULTS.ttsVoice;
+        // Versioned cache key prevents legacy/cloud audio cached under full_<text>
+        // from being used when the selected provider is Pocket TTS.
+        const cacheKey = 'full_local_pocket_tts_' + model + '_' + voice + '_' + String(text ?? '');
+        try {
+          const cachedAudio = await this.app.db.get('audio_cache', cacheKey);
+          if (cachedAudio?.value instanceof Blob && cachedAudio.value.size > 0) {
+            return cachedAudio.value;
+          }
+        } catch (error) {
+          console.debug('Pocket TTS audio cache read failed; synthesizing fresh audio:', error);
+        }
+
+        const audioBlob = await localTTS(text);
+        if (!(audioBlob instanceof Blob) || audioBlob.size === 0) {
+          throw new Error('Pocket TTS returned no audio data.');
+        }
+        await this.app.db.set('audio_cache', { text: cacheKey, value: audioBlob })
+          .catch(error => console.debug('Pocket TTS audio cache write failed:', error));
+        return audioBlob;
+      };
+    }
+
+    // The original player method also requires an ElevenLabs key. For Provider 3,
+    // bypass that cloud-only path for simple message/sentence playback as well.
     const originalAdvancedPlayTextToSpeech = AdvancedTTSPlayer.prototype.playTextToSpeech;
     if (typeof originalAdvancedPlayTextToSpeech === 'function') {
       AdvancedTTSPlayer.prototype.playTextToSpeech = async function(text, button, progressBar, messageId) {
