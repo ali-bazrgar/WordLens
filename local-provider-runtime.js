@@ -68,6 +68,20 @@
 
   const normalizeBase = (value) => (value || '').trim().replace(/\/+$/, '');
 
+  const withDeadline = async (promise, milliseconds, message) => {
+    let timer;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(message)), milliseconds);
+        })
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   // Accept either a server root URL or an already-versioned /v1 URL.
   // The same-origin /local-api proxy has its own route and must not gain /v1.
   const normalizeApiBase = (value) => {
@@ -186,7 +200,25 @@
     const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
     const apiKey = getCfg('llmApiKey');
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
-    const response = await fetchWithNetworkDiagnostics(base + '/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model, messages, ...extra }) }, 'LLM');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 180000);
+    let response;
+    try {
+      response = await fetchWithNetworkDiagnostics(base + '/chat/completions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ model, messages, ...extra }),
+        signal: controller.signal,
+        cache: 'no-store'
+      }, 'LLM');
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === 'AbortError') {
+        throw new Error('LLM request timed out after 180 seconds. Check that the local model server is responsive and not occupied by another job.');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
     if (!response.ok) {
       const errorText = await response.text();
       throw new Error('OpenAI-compatible LLM API error: ' + response.status + ', ' + errorText);
@@ -270,7 +302,11 @@
 
     const context = new AudioContextClass();
     try {
-      const decoded = await context.decodeAudioData(await audioBlob.arrayBuffer());
+      const decoded = await withDeadline(
+        context.decodeAudioData(await audioBlob.arrayBuffer()),
+        30000,
+        'Decoding microphone audio took longer than 30 seconds. Try a shorter recording or a supported Chrome browser.'
+      );
       const sampleRate = 16000;
       const frameCount = Math.max(1, Math.ceil(decoded.duration * sampleRate));
       const offline = new OfflineContextClass(1, frameCount, sampleRate);
@@ -278,7 +314,11 @@
       source.buffer = decoded;
       source.connect(offline.destination);
       source.start(0);
-      const rendered = await offline.startRendering();
+      const rendered = await withDeadline(
+        offline.startRendering(),
+        30000,
+        'Audio resampling took longer than 30 seconds. Try a shorter recording.'
+      );
       const samples = rendered.getChannelData(0);
       const wavBuffer = new ArrayBuffer(44 + samples.length * 2);
       const view = new DataView(wavBuffer);
@@ -318,13 +358,12 @@
     const apiKey = isAvalai ? (app?.AVALAI_API_KEY || '') : getCfg('sttApiKey');
     if (isAvalai && !apiKey) throw new Error('Avalai STT is selected but its API key is not set in Settings.');
 
-    // Browser MediaRecorder typically produces WebM/Opus. Whisper.cpp handles WAV
-    // reliably unless its optional FFmpeg conversion is enabled.
+    // Convert browser MediaRecorder WebM/Opus to WAV for local whisper.cpp.
     const uploadBlob = isAvalai ? audioBlob : await toMonoWav16k(audioBlob);
     const mimeType = (uploadBlob.type || '').toLowerCase();
     const extension = mimeType.includes('wav') ? 'wav' : mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'm4a' : 'webm';
     const language = getCfg('sttLanguage');
-    const headers = { 'Accept': 'application/json' };
+    const headers = { 'Accept': 'application/json, text/plain, */*' };
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
     const createForm = (includeModel) => {
       const form = new FormData();
@@ -334,64 +373,85 @@
       form.append('response_format', 'json');
       return form;
     };
+
+    // Keep the timer alive until both HTTP headers and the full response body have
+    // arrived. A timeout that ends at response headers can still leave text() hung.
     const send = async (url, includeModel = true) => {
       const controller = new AbortController();
-      // Local Whisper may be CPU-bound; use a generous deadline but never leave
-      // the UI stuck on "Transcribing…" forever if the service stops responding.
-      const timeout = setTimeout(() => controller.abort(), 120000);
+      const timeout = setTimeout(() => controller.abort(), 60000);
       try {
-        return await fetchWithNetworkDiagnostics(url, {
+        const response = await fetchWithNetworkDiagnostics(url, {
           method: 'POST',
           headers,
           body: createForm(includeModel),
-          signal: controller.signal
+          signal: controller.signal,
+          cache: 'no-store'
         }, 'STT transcription');
-      } catch (error) {
+        const bodyText = await response.text();
         if (controller.signal.aborted) {
-          throw new Error('STT transcription timed out after 120 seconds. Check that whisper.cpp is running, reachable at the configured STT URL, and not busy with another request.');
+          throw new Error('STT response timed out after 60 seconds. Check the whisper.cpp server and whether it is processing another request.');
+        }
+        return { response, bodyText };
+      } catch (error) {
+        if (controller.signal.aborted || error?.name === 'AbortError') {
+          throw new Error('STT request or response timed out after 60 seconds. Check that whisper.cpp is running, reachable, and not busy with another request.');
         }
         throw error;
       } finally {
         clearTimeout(timeout);
       }
     };
-    const readTranscript = async (response) => {
-      const responseText = await response.text();
+
+    const readTranscript = (responseText) => {
       let data;
-      try { data = JSON.parse(responseText); } catch (_) { data = { text: responseText }; }
+      try { data = JSON.parse(String(responseText ?? '').trim()); }
+      catch (_) { data = { text: String(responseText ?? '') }; }
       const transcript = typeof data?.text === 'string' ? data.text
         : typeof data?.transcription === 'string' ? data.transcription
-        : typeof data?.result?.text === 'string' ? data.result.text : '';
-      if (!transcript.trim()) throw new Error('STT API returned an empty transcript.');
+        : typeof data?.result?.text === 'string' ? data.result.text
+        : Array.isArray(data?.segments) ? data.segments.map(part => part?.text || '').join(' ')
+        : '';
+      if (!transcript.trim()) throw new Error('STT API returned an empty transcript. Check the selected language and speak clearly.');
       return transcript.trim();
     };
 
-    const response = await send(base + '/audio/transcriptions');
-    if (response.ok) return readTranscript(response);
-    const errorText = await response.text();
-
-    // whisper.cpp's server defaults to /inference (configurable with --inference-path).
-    // Try that native endpoint only when the OpenAI-compatible route is unavailable
-    // or rejects the request format; do not mask other provider errors.
-    const supportsNativeFallback = !isAvalai && (
-      response.status === 404 || response.status === 405 ||
-      (response.status === 400 && /invalid request|no .file. field|failed to read audio/i.test(errorText))
-    );
-    if (supportsNativeFallback) {
+    let nativeError = '';
+    // Local whisper.cpp serves /inference natively; hit it first to avoid waiting
+    // on a non-existent OpenAI route. Other compatible servers fall back below.
+    if (!isAvalai) {
       const nativeRoot = usesProxy()
         ? '/local-api'
         : normalizeBase(getCfg('sttBase')).replace(/\/v1$/i, '');
-      const nativeResponse = await send(nativeRoot + '/inference', false);
-      if (nativeResponse.ok) return readTranscript(nativeResponse);
-      const nativeError = await nativeResponse.text();
-      throw new Error(
-        'STT request failed at the OpenAI-compatible endpoint (' + response.status + ': ' + errorText +
-        ') and whisper.cpp /inference fallback (' + nativeResponse.status + ': ' + nativeError + ').'
-      );
+      try {
+        const native = await send(nativeRoot + '/inference', false);
+        if (native.response.ok) {
+          try { return readTranscript(native.bodyText); }
+          catch (error) { nativeError = error.message; }
+        } else {
+          nativeError = 'whisper.cpp /inference returned HTTP ' + native.response.status + ': ' + native.bodyText.slice(0, 700);
+        }
+      } catch (error) {
+        nativeError = error.message || String(error);
+        // Do not start a second long inference if the first endpoint timed out.
+        if (/timed out after 60 seconds/i.test(nativeError)) throw error;
+      }
     }
-    throw new Error('OpenAI-compatible STT API error: ' + response.status + ', ' + errorText);
-  };
 
+    try {
+      const compatible = await send(base + '/audio/transcriptions', true);
+      if (compatible.response.ok) {
+        try { return readTranscript(compatible.bodyText); }
+        catch (error) {
+          throw new Error('OpenAI-compatible STT endpoint returned HTTP ' + compatible.response.status +
+            ' but no usable transcript. ' + error.message + (nativeError ? ' Native endpoint: ' + nativeError : ''));
+        }
+      }
+      throw new Error('OpenAI-compatible STT returned HTTP ' + compatible.response.status + ': ' + compatible.bodyText.slice(0, 1000));
+    } catch (error) {
+      const detail = error?.message || String(error);
+      throw new Error('Transcription failed. ' + (nativeError ? 'Native /inference: ' + nativeError + ' | ' : '') + detail);
+    }
+  };
 
   const playLocalBlob = async (app, audioBlob, button, progressBar) => {
     if (!audioBlob || !audioBlob.size) throw new Error('Empty local audio blob.');
