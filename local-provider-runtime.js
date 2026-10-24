@@ -795,13 +795,73 @@
   };
   const playRealtimeAudio = async (blob, session) => {
     if (!blob || !blob.size) throw new Error('TTS returned an empty audio file.');
-    const url=URL.createObjectURL(blob), audio=new Audio(url); session.audio=audio;
+
+    // Prefer the AudioContext already unlocked by the user's headset-button tap.
+    // This is more reliable on mobile browsers than starting a fresh media element
+    // after asynchronous STT/LLM requests have completed.
+    const context = session?.audioContext;
+    if (context && context.state !== 'closed' && typeof context.decodeAudioData === 'function') {
+      try {
+        await context.resume();
+        const decoded = await context.decodeAudioData(await blob.arrayBuffer());
+        const source = context.createBufferSource();
+        source.buffer = decoded;
+        source.connect(context.destination);
+        session.audio = source;
+        await new Promise((resolve, reject) => {
+          let settled = false;
+          const finish = error => {
+            if (settled) return;
+            settled = true;
+            source.onended = null;
+            if (session.audio === source) session.audio = null;
+            if (session.audioStop === stop) session.audioStop = null;
+            if (error) reject(error); else resolve();
+          };
+          const stop = () => {
+            if (settled) return;
+            try { source.stop(); } catch (_) {}
+            finish();
+          };
+          source.onended = () => finish();
+          session.audioStop = stop;
+          try { source.start(0); } catch (error) { finish(error); }
+        });
+        return;
+      } catch (error) {
+        if (session.audio) session.audio = null;
+        if (session.audioStop) session.audioStop = null;
+        console.debug('Web Audio playback unavailable; falling back to a media element:', error);
+      }
+    }
+
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    session.audio = audio;
     try {
-      const ended=new Promise((resolve,reject)=>{ let settled=false; const finish=error=>{ if(settled)return;settled=true;audio.removeEventListener('ended',onEnded);audio.removeEventListener('error',onError);session.audioStop=null;if(error)reject(error);else resolve(); };
-        const onEnded=()=>finish(), onError=()=>finish(new Error('The browser could not play the TTS audio.')); session.audioStop=()=>finish();
-        audio.addEventListener('ended',onEnded,{once:true});audio.addEventListener('error',onError,{once:true}); });
-      await audio.play(); await ended;
-    } finally { if(session.audio===audio)session.audio=null;if(session.audioStop)session.audioStop();URL.revokeObjectURL(url); }
+      const ended = new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = error => {
+          if (settled) return;
+          settled = true;
+          audio.removeEventListener('ended', onEnded);
+          audio.removeEventListener('error', onError);
+          session.audioStop = null;
+          if (error) reject(error); else resolve();
+        };
+        const onEnded = () => finish();
+        const onError = () => finish(new Error('The browser could not play the TTS audio.'));
+        session.audioStop = () => finish();
+        audio.addEventListener('ended', onEnded, { once: true });
+        audio.addEventListener('error', onError, { once: true });
+      });
+      await audio.play();
+      await ended;
+    } finally {
+      if (session.audio === audio) session.audio = null;
+      if (session.audioStop) session.audioStop();
+      URL.revokeObjectURL(url);
+    }
   };
 
   if (typeof AIChatApp !== 'undefined') {
