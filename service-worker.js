@@ -1,6 +1,6 @@
-const CACHE_NAME = 'wordlens-app-v17-offline-storage-flashcards-audio';
+const CACHE_NAME = 'wordlens-app-v18-offline-audio-srs';
 const APP_BASE = self.registration.scope;
-const APP_VERSION = '20261024-offline-storage-flashcards-audio';
+const APP_VERSION = '20261024-offline-audio-srs-v18';
 
 // The app shell, local data, and flashcards work offline after one successful
 // online visit. API endpoints are intentionally never cached.
@@ -19,15 +19,20 @@ const APP_SHELL = [
 
 const MARKED_URL = 'https://cdn.jsdelivr.net/npm/marked/marked.min.js';
 
-async function cacheFirstPartyAsset(cache, relativeUrl) {
+async function cacheFirstPartyAsset(cache, relativeUrl, required = false) {
   try {
     const request = new Request(new URL(relativeUrl, APP_BASE).href, { cache: 'reload' });
     const response = await fetch(request);
-    if (response && response.ok) await cache.put(request, response.clone());
+    if (response && response.ok) {
+      await cache.put(request, response.clone());
+      return true;
+    }
+    if (required) throw new Error('HTTP ' + (response?.status ?? 'unknown'));
   } catch (error) {
-    // Keep the worker installable if a non-essential asset is temporarily unavailable.
     console.warn('[WordLens SW] Could not precache:', relativeUrl, error);
+    if (required) throw error;
   }
+  return false;
 }
 
 async function cacheMarkdownDependency(cache) {
@@ -47,8 +52,24 @@ async function cacheMarkdownDependency(cache) {
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE_NAME);
+    // Cache critical first-party files before this worker takes control.
+    const requiredShell = [
+      './index.html',
+      './style.css?v=' + APP_VERSION,
+      './app.js?v=' + APP_VERSION,
+      './local-provider.js',
+      './local-provider-runtime.js?v=' + APP_VERSION,
+      './manifest.json'
+    ];
+    const optionalShell = [
+      './',
+      './favicon.ico',
+      './icons/icon-192x192.png',
+      './icons/icon-512x512.png'
+    ];
+    await Promise.all(requiredShell.map(url => cacheFirstPartyAsset(cache, url, true)));
     await Promise.allSettled([
-      ...APP_SHELL.map(url => cacheFirstPartyAsset(cache, url)),
+      ...optionalShell.map(url => cacheFirstPartyAsset(cache, url)),
       cacheMarkdownDependency(cache)
     ]);
     await self.skipWaiting();
