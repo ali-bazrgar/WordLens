@@ -76,15 +76,58 @@
     return base + '/v1';
   };
 
+  // A phone opening WordLens at a private LAN address must use the server-side
+  // proxy. Loopback URLs such as 127.0.0.1 refer to the phone itself, not the PC.
+  const isLanHostedClient = () => {
+    const hostname = String(window.location?.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+    if (!hostname || ['localhost', '127.0.0.1', '::1'].includes(hostname)) return false;
+    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)) {
+      const octets = hostname.split('.').map(Number);
+      if (octets.some(part => part < 0 || part > 255)) return false;
+      const [a, b] = octets;
+      return a === 10 || (a === 192 && b === 168) ||
+        (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
+    }
+    return hostname.endsWith('.local') || /^(?:fc|fd)[0-9a-f:]*$/i.test(hostname) ||
+      /^fe80:/i.test(hostname);
+  };
+  const usesProxy = () => isLanHostedClient() || getCfg('apiMode') !== 'direct';
+  if (isLanHostedClient() && getCfg('apiMode') === 'direct') setCfg('apiMode', 'proxy');
+
+  const fetchWithNetworkDiagnostics = async (url, options, label) => {
+    try {
+      return await fetch(url, options);
+    } catch (error) {
+      const target = /^https?:\/\//i.test(String(url))
+        ? String(url)
+        : new URL(String(url), window.location.href).href;
+      const detail = error?.message || String(error);
+      if (isLanHostedClient() && String(url).startsWith('/local-api/')) {
+        throw new Error(
+          label + ': cannot reach the WordLens proxy at ' + target +
+          '. Check that the phone and PC are on the same Wi-Fi, the PC address has not changed, ' +
+          'and Windows Firewall allows inbound TCP port 8000. Browser detail: ' + detail
+        );
+      }
+      throw new Error(
+        label + ': network request failed for ' + target +
+        '. Check service availability and, in Direct mode, CORS/HTTPS restrictions. Browser detail: ' + detail
+      );
+    }
+  };
+
   const requestBase = (key) => {
-    if (getCfg('apiMode') !== 'direct') return '/local-api';
+    if (usesProxy()) return '/local-api';
     const configured = getCfg(key);
     if (!configured) throw new Error('Set the ' + key.replace(/([A-Z])/g, ' $1') + ' Base URL in Settings → Provider 3 — API Connections.');
     return normalizeApiBase(configured);
   };
 
   const syncProxyConfig = async () => {
-    if (getCfg('apiMode') === 'direct') return;
+    // Upstream URLs are host-machine settings. Do not overwrite them from a
+    // phone or another LAN client.
+    if (isLanHostedClient()) return { skipped: true, reason: 'lan-client' };
+    if (getCfg('apiMode') === 'direct') return { skipped: true, reason: 'direct-mode' };
     const response = await fetch('/local-api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -99,7 +142,7 @@
   };
 
   const loadProxyConfig = async (fields) => {
-    if (getCfg('apiMode') === 'direct') return;
+    if (!usesProxy()) return;
     try {
       const response = await fetch('/local-api/config', { cache: 'no-store' });
       if (!response.ok) return;
@@ -121,7 +164,7 @@
     const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
     const apiKey = getCfg('llmApiKey');
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
-    const response = await fetch(base + '/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model, messages, ...extra }) });
+    const response = await fetchWithNetworkDiagnostics(base + '/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model, messages, ...extra }) }, 'LLM');
     if (!response.ok) {
       const errorText = await response.text();
       throw new Error('OpenAI-compatible LLM API error: ' + response.status + ', ' + errorText);
@@ -145,9 +188,9 @@
       voice: getCfg('ttsVoice') || DEFAULTS.ttsVoice,
       response_format: getCfg('ttsFormat') || DEFAULTS.ttsFormat
     };
-    const response = await fetch(base + '/audio/speech', {
+    const response = await fetchWithNetworkDiagnostics(base + '/audio/speech', {
       method: 'POST', headers, body: JSON.stringify(payload)
-    });
+    }, 'TTS');
     if (response.ok) {
       const blob = await response.blob();
       if (!blob.size) throw new Error('Pocket TTS returned an empty audio file.');
@@ -161,9 +204,9 @@
     if (!tryNativePocketTTS) {
       throw new Error('Pocket TTS API error: ' + response.status + ', ' + errorText);
     }
-    const nativeRoot = getCfg('apiMode') === 'direct'
-      ? normalizeBase(getCfg('ttsBase')).replace(/\/v1$/i, '')
-      : '/local-api';
+    const nativeRoot = usesProxy()
+      ? '/local-api'
+      : normalizeBase(getCfg('ttsBase')).replace(/\/v1$/i, '');
     const nativeForm = new FormData();
     nativeForm.append('text', String(text ?? ''));
     const voice = getCfg('ttsVoice') || 'clone';
@@ -180,9 +223,9 @@
     }
     const nativeHeaders = { 'Accept': 'audio/wav, audio/*, application/octet-stream' };
     if (apiKey) nativeHeaders.Authorization = 'Bearer ' + apiKey;
-    const nativeResponse = await fetch(nativeRoot + '/tts', {
+    const nativeResponse = await fetchWithNetworkDiagnostics(nativeRoot + '/tts', {
       method: 'POST', headers: nativeHeaders, body: nativeForm
-    });
+    }, 'Native TTS');
     if (!nativeResponse.ok) {
       const nativeError = await nativeResponse.text();
       throw new Error(
@@ -269,11 +312,11 @@
       form.append('response_format', 'json');
       return form;
     };
-    const send = (url, includeModel = true) => fetch(url, {
+    const send = (url, includeModel = true) => fetchWithNetworkDiagnostics(url, {
       method: 'POST',
       headers,
       body: createForm(includeModel)
-    });
+    }, 'STT transcription');
     const readTranscript = async (response) => {
       const responseText = await response.text();
       let data;
@@ -297,10 +340,9 @@
       (response.status === 400 && /invalid request|no .file. field|failed to read audio/i.test(errorText))
     );
     if (supportsNativeFallback) {
-      const apiMode = getCfg('apiMode');
-      const nativeRoot = apiMode === 'direct'
-        ? normalizeBase(getCfg('sttBase')).replace(/\/v1$/i, '')
-        : '/local-api';
+      const nativeRoot = usesProxy()
+        ? '/local-api'
+        : normalizeBase(getCfg('sttBase')).replace(/\/v1$/i, '');
       const nativeResponse = await send(nativeRoot + '/inference', false);
       if (nativeResponse.ok) return readTranscript(nativeResponse);
       const nativeError = await nativeResponse.text();
@@ -378,6 +420,7 @@
     section.innerHTML = `
       <p><b>Provider 3 — API Connections</b></p>
       <small style="color:#666;display:block;margin-bottom:8px;">Enter each API's real upstream address below. Local proxy mode (recommended) saves these addresses on this computer and avoids browser CORS. Direct mode calls the URLs from your browser and requires CORS support.</small>
+      <div id="local-lan-config-note" style="display:none;margin:8px 0;padding:10px;border-radius:8px;background:rgba(0,136,204,0.08);font-size:12px;">You opened WordLens from another device on the local network. Requests are routed through this PC's proxy automatically. Upstream server addresses can only be changed on the PC running WordLens; this screen can still save device-local preferences such as model IDs and language.</div>
       <label style="display:block;margin:8px 0 4px;">Connection Mode</label>
       <select id="local-api-mode" class="settings-select">
         <option value="proxy">Local proxy — recommended</option>
@@ -455,6 +498,14 @@
       sttModel: document.getElementById('local-stt-model'),
       sttLanguage: document.getElementById('local-stt-language')
     };
+    if (isLanHostedClient()) {
+      setCfg('apiMode', 'proxy');
+      apiModeField.value = 'proxy';
+      apiModeField.disabled = true;
+      ['llmBase', 'ttsBase', 'sttBase'].forEach(key => { if (fields[key]) fields[key].disabled = true; });
+      const note = document.getElementById('local-lan-config-note');
+      if (note) note.style.display = 'block';
+    }
     loadProxyConfig(fields);
     apiModeField.addEventListener('change', () => {
       const status = document.getElementById('local-provider-status');
@@ -466,14 +517,15 @@
     document.getElementById('local-provider-test').addEventListener('click', async () => {
       const status = document.getElementById('local-provider-status');
       Object.entries(fields).forEach(([key, element]) => { if (element) setCfg(key, element.value); });
-      status.textContent = 'Saving addresses and testing LLM + TTS…';
+      status.textContent = isLanHostedClient() ? 'Testing through this PC’s local proxy…' : 'Saving addresses and testing LLM + TTS…';
       try {
-        await syncProxyConfig();
+        const proxySync = await syncProxyConfig();
         const llmSample = await localCompletion([{ role: 'user', content: 'Reply with exactly OK.' }], { temperature: 0, max_tokens: 8 });
         const ttsSample = await localTTS('Hello, this is a local text to speech test.');
         if (!(ttsSample instanceof Blob) || ttsSample.size === 0) throw new Error('TTS synthesis returned no audio.');
         const sttHint = getCfg('sttProvider') === 'avalai' ? 'Avalai STT key is checked when recording.' : (!getCfg('sttBase') ? 'Enter the actual STT Base URL before transcribing.' : 'STT is tested on the first recording.');
-        status.textContent = 'OK — LLM replied “' + llmSample.slice(0,60) + '”; TTS returned ' + Math.round(ttsSample.size/1024) + ' KB audio. ' + sttHint;
+        const lanHint = proxySync?.reason === 'lan-client' ? ' Server URLs remain controlled by the PC; this phone uses its proxy.' : '';
+        status.textContent = 'OK — LLM replied “' + llmSample.slice(0,60) + '”; TTS returned ' + Math.round(ttsSample.size/1024) + ' KB audio. ' + sttHint + lanHint;
       } catch (error) { status.textContent = 'Error: ' + error.message; console.error('Local Provider 3 test failed:', error); }
     });
 
@@ -500,8 +552,8 @@
       let stream = null;
       sttTestButton.disabled = true;
       try {
-        await syncProxyConfig();
-        if (getCfg('sttProvider') !== 'avalai' && getCfg('apiMode') === 'direct' && !getCfg('sttBase')) {
+        const proxySync = await syncProxyConfig();
+        if (getCfg('sttProvider') !== 'avalai' && !usesProxy() && !getCfg('sttBase')) {
           throw new Error('Enter the STT Base URL first.');
         }
         if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
@@ -521,7 +573,8 @@
         await stopped;
         const sample = new Blob(chunks, { type: recorder.mimeType || chunks[0]?.type || 'audio/webm' });
         const transcript = await localSTT(sample, window.WORDLENS_APP || null);
-        status.textContent = 'STT OK — recognized: ' + transcript;
+        const lanHint = proxySync?.reason === 'lan-client' ? ' (through this PC’s local proxy)' : '';
+        status.textContent = 'STT OK — recognized: ' + transcript + lanHint;
       } catch (error) {
         status.textContent = 'STT test failed: ' + error.message;
         console.error('STT connection test failed:', error);
@@ -570,10 +623,13 @@
       };
       Object.entries(fields).forEach(([key, element]) => { if (element) setCfg(key, element.value); });
       let proxyError = null;
-      try { await syncProxyConfig(); } catch (error) { proxyError = error; console.error('API proxy settings could not be saved:', error); }
+      let proxySync = null;
+      try { proxySync = await syncProxyConfig(); } catch (error) { proxyError = error; console.error('API proxy settings could not be saved:', error); }
       originalSaveSettings.call(this);
-      if (proxyError && getCfg('apiMode') === 'proxy') {
-        this.showToast('Browser settings saved, but local API addresses were not updated. Open WordLens through server.py or switch to Direct mode. ' + proxyError.message, 'warning');
+      if (proxySync?.reason === 'lan-client') {
+        this.showToast('Device settings saved. Server addresses are read-only from the phone; change them on the PC running WordLens.', 'warning');
+      } else if (proxyError && getCfg('apiMode') === 'proxy') {
+        this.showToast('Browser settings saved, but local API addresses were not updated. Open WordLens on the PC at http://127.0.0.1:8000. ' + proxyError.message, 'warning');
       } else {
         this.showToast('API connection settings saved.', 'success');
       }
@@ -771,7 +827,7 @@
       this.realtimeBtn?.addEventListener('click',()=>{if(this.realtimeSession)this.stopRealtimeConversation();else this.startRealtimeConversation();});
     };
     AIChatApp.prototype.validateRealtimeConfiguration = async function() {
-      if (getCfg('apiMode') === 'direct') {
+      if (!usesProxy()) {
         if (!getCfg('llmBase')) throw new Error('Set the LLM Base URL under Settings → Provider 3 — API Connections.');
         if (!getCfg('ttsBase')) throw new Error('Set the TTS Base URL under Settings → Provider 3 — API Connections.');
         if (getCfg('sttProvider') === 'avalai') {
