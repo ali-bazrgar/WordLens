@@ -3247,19 +3247,27 @@ Prefer a small, accurate entry over a long, speculative one.`;
       };
 
       const normalizeWordList = (value) => {
-        const list = Array.isArray(value)
-          ? value.map(v => (v ?? '').toString().trim())
-          : (typeof value === 'string'
-              ? value.split(/[,\n]/g).map(v => v.trim())
-              : []);
-
-        const hasLatin = (s) => /[A-Za-z]/.test(s);
-        const hasArabic = (s) => /[\u0600-\u06FF]/.test(s);
-
-        return list
-          .filter(Boolean)
+        const rawItems = Array.isArray(value)
+          ? value
+          : typeof value === 'string'
+            ? value.split(/[,;\n]/g)
+            : Array.isArray(value?.items)
+              ? value.items
+              : Array.isArray(value?.words)
+                ? value.words
+                : [];
+        const seen = new Set();
+        return rawItems
+          .map(item => String(typeof item === 'object' && item !== null ? (item.word ?? item.term ?? item.text ?? '') : item ?? '').trim())
           .map(s => s.replace(/^["'\s]+|["'\s]+$/g, ''))
-          .filter(s => s && hasLatin(s) && !hasArabic(s));
+          .filter(s => s && /^[A-Za-z][A-Za-z\s'-]*$/.test(s))
+          .filter(s => {
+            const key = s.toLowerCase();
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .slice(0, 3);
       };
 
       const normalizeMeaningResult = (obj) => {
@@ -3278,8 +3286,8 @@ Prefer a small, accurate entry over a long, speculative one.`;
 
         return {
           meanings,
-          synonyms: normalizeWordList(obj.synonyms),
-          antonyms: normalizeWordList(obj.antonyms)
+          synonyms: normalizeWordList(obj.synonyms ?? obj.synonym ?? obj.near_synonyms ?? obj.synonyms_en ?? obj.similar_words),
+          antonyms: normalizeWordList(obj.antonyms ?? obj.antonym ?? obj.opposites ?? obj.antonyms_en)
         };
       };
 
