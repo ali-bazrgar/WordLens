@@ -3263,7 +3263,7 @@ antonyms: 1–3 common English opposites if a meaningful opposite exists; use []
 Related terms must be English only. No duplicate items, labels, explanations, Markdown or extra keys.
 ${requirePersian ? "CORRECTION: The prior meaning was not Persian. Put a natural Persian translation in Persian script in every meanings[].text field; English definitions are invalid." : ""}
 ${requireRelatedTerms ? "RELATED-TERMS MODE: Focus on useful synonyms and meaningful opposites for this exact word. Do not default to empty arrays. The terms must be English. Keep meanings concise and Persian." : ""}
-${forceRefresh ? "Reassess the word independently; accuracy matters more than novelty." : ""}`;;
+${forceRefresh ? "Reassess the word independently; accuracy matters more than novelty." : ""}`;
 
     const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }], synonyms: [], antonyms: [] });
     try {
