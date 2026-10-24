@@ -3605,7 +3605,8 @@ Be thorough and comprehensive.`;
         interval: 0,
         easeFactor: 2.5,
         lastReviewed: null,
-        status: 'new'
+        status: 'new',
+        fsrs: this.normalizeFSRSState({}, null, 0, 0)
       };
 
       await this.db.set(this.LEITNER_STORE, newCard);
@@ -3620,87 +3621,57 @@ Be thorough and comprehensive.`;
 
   async openLeitnerModal(chatId = null, scopeOverride = null) {
     this.leitnerModal.classList.remove("hidden");
-    this.leitnerCardContainer.classList.remove('hidden');
-    this.leitnerFinishedScreen.classList.add('hidden');
+    this.leitnerCardContainer.classList.remove("hidden");
+    this.leitnerFinishedScreen.classList.add("hidden");
     const scope = scopeOverride || (chatId ? this.getChatScope(chatId) : this.getActiveScope());
     const scopeKey = this.getScopeKey(scope);
-    const includeGlobal = scopeKey !== 'global:all';
+    const includeGlobal = scopeKey !== "global:all";
     this.currentLeitnerScope = scope;
-    
+
     try {
       const allCards = await this.db.getAll(this.LEITNER_STORE);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      
-      let cardsToReview = allCards.filter(card => {
-        // Validate card structure
+      const now = new Date();
+      const todayStart = this.getMidnightLocal(now);
+      const cardsToReview = allCards.filter(card => {
         if (!card || !card.scopeKey || !card.word || !card.id) {
-          console.warn('Invalid card found:', card);
+          console.warn("Invalid card found:", card);
           return false;
         }
-        
-        // Filter by scope
-        if (card.scopeKey !== scopeKey) {
-          if (!includeGlobal) return false;
-          if (card.scopeKey !== 'global:all') return false;
-        }
-        
+        if (card.scopeKey !== scopeKey && (!includeGlobal || card.scopeKey !== "global:all")) return false;
         const dueIso = this.coerceIsoDate(card.dueDate, card.createdAt);
-        const dueDate = this.getMidnightLocal(dueIso);
-        if (!dueDate) return false;
-        return dueDate.getTime() <= today.getTime();
+        const dueDate = dueIso ? new Date(dueIso) : null;
+        return !!dueDate && !Number.isNaN(dueDate.getTime()) && dueDate.getTime() <= now.getTime();
       });
-      
-      // Sort cards by priority: overdue (oldest first) -> new -> regular due
+
       cardsToReview.sort((a, b) => {
-        const aDueIso = this.coerceIsoDate(a.dueDate, a.createdAt);
-        const bDueIso = this.coerceIsoDate(b.dueDate, b.createdAt);
-        const aDue = this.getMidnightLocal(aDueIso) || today;
-        const bDue = this.getMidnightLocal(bDueIso) || today;
-        
-        const aIsNew = (a.repetitions || 0) === 0;
-        const bIsNew = (b.repetitions || 0) === 0;
-
-        const aIsOverdue = !aIsNew && aDue.getTime() < today.getTime();
-        const bIsOverdue = !bIsNew && bDue.getTime() < today.getTime();
-
-        // Overdue review cards first
-        if (aIsOverdue && !bIsOverdue) return -1;
-        if (!aIsOverdue && bIsOverdue) return 1;
-        if (aIsOverdue && bIsOverdue) return aDue - bDue;
-        
-        // Both new - random order
-        if (aIsNew && bIsNew) return Math.random() - 0.5;
-        
-        // One is new, one is review - new cards next
-        if (aIsNew) return -1;
-        if (bIsNew) return 1;
-        
-        // Both are review cards - sort by due date (oldest first)
-        return aDue - bDue;
+        const aIso = this.coerceIsoDate(a.dueDate, a.createdAt);
+        const bIso = this.coerceIsoDate(b.dueDate, b.createdAt);
+        const aDue = aIso ? new Date(aIso) : now;
+        const bDue = bIso ? new Date(bIso) : now;
+        const aNew = this.isNewFSRSCard(a);
+        const bNew = this.isNewFSRSCard(b);
+        const aOverdue = !aNew && !!todayStart && aDue.getTime() < todayStart.getTime();
+        const bOverdue = !bNew && !!todayStart && bDue.getTime() < todayStart.getTime();
+        if (aOverdue !== bOverdue) return aOverdue ? -1 : 1;
+        if (aOverdue && bOverdue) return aDue.getTime() - bDue.getTime();
+        if (aNew !== bNew) return aNew ? -1 : 1;
+        return aDue.getTime() - bDue.getTime();
       });
-      
+
       this.leitnerQueue = cardsToReview;
-      
-      // Calculate stats
-      const newCount = this.leitnerQueue.filter(c => (c.repetitions || 0) === 0).length;
-      const reviewCount = this.leitnerQueue.filter(c => (c.repetitions || 0) > 0).length;
-      const totalCount = this.leitnerQueue.length;
-      
-      this.leitnerStatsNew.textContent = `New: ${newCount}`;
-      this.leitnerStatsDue.textContent = `Review: ${reviewCount} | Total: ${totalCount}`;
-      
-      if (this.leitnerQueue.length > 0) {
-        this.showNextCard();
-      } else {
-        this.showFinishedScreen();
-      }
+      const newCount = cardsToReview.filter(card => this.isNewFSRSCard(card)).length;
+      const reviewCount = cardsToReview.length - newCount;
+      this.leitnerStatsNew.textContent = "New: " + newCount;
+      this.leitnerStatsDue.textContent = "Review: " + reviewCount + " | Total: " + cardsToReview.length;
+      if (this.leitnerQueue.length > 0) this.showNextCard();
+      else this.showFinishedScreen();
     } catch (error) {
-      console.error("Error starting Leitner review:", error);
+      console.error("Error starting FSRS-6 review:", error);
       this.cardFrontText.textContent = "Error loading cards.";
+      this.showToast("Could not load flashcards for review.", "error");
     }
   }
-  
+
   // Quick review for a single card
   async startQuickReview(card) {
     this.leitnerModal.classList.remove("hidden");
@@ -3728,8 +3699,8 @@ Be thorough and comprehensive.`;
     
     // Update remaining count in stats
     const remaining = this.leitnerQueue.length;
-    const newCount = this.leitnerQueue.filter(c => (c.repetitions || 0) === 0).length;
-    const reviewCount = this.leitnerQueue.filter(c => (c.repetitions || 0) > 0).length;
+    const newCount = this.leitnerQueue.filter(c => this.isNewFSRSCard(c)).length;
+    const reviewCount = this.leitnerQueue.length - newCount;
     
     this.leitnerStatsNew.textContent = `New: ${newCount}`;
     this.leitnerStatsDue.textContent = `Review: ${reviewCount} | Remaining: ${remaining}`;
