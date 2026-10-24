@@ -2246,7 +2246,7 @@ class AIChatApp {
     if (cached) return cached;
 
     if (!this.ELEVENLABS_API_KEY) return null;
-    const response = await fetch('http://192.168.88.50:1234/v1/voices', {
+    const response = await fetch('https://api.elevenlabs.io/v1/voices', {
       method: 'GET',
       headers: { 'xi-api-key': this.ELEVENLABS_API_KEY }
     });
@@ -2307,7 +2307,7 @@ class AIChatApp {
       const voiceId = await this.getElevenLabsPreferredVoiceId('Brian');
       if (!voiceId) throw new Error('ElevenLabs voice "Brian" not found.');
 
-      const response = await fetch(`https://192.168.88.50:1234/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
         method: 'POST',
         headers: {
           'xi-api-key': this.ELEVENLABS_API_KEY,
@@ -2360,7 +2360,7 @@ class AIChatApp {
     button.classList.add("playing");
     if (progressBar) this.updateProgress(progressBar, 0);
     try {
-      const response = await fetch('http://192.168.88.50:4321/v1/audio/speech', {
+      const response = await fetch('/local-api/audio/speech', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${this.AVALAI_API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: 'kitten-tts-mini-0.8', input: text, voice: 'expr-voice-4-m' })
@@ -2771,7 +2771,7 @@ class AIChatApp {
       provider: { data_collection: 'allow' }
     };
 
-    const response = await fetch('http://192.168.88.50:1234/v1/chat/completions', {
+    const response = await fetch('/local-api/chat/completions', {
       method: 'POST',
       headers,
       body: JSON.stringify(requestBody)
@@ -2857,7 +2857,7 @@ Be thorough and comprehensive.`;
         headers['X-Title'] = document.title;
       }
 
-      const response = await fetch('http://192.168.88.50:1234/v1/chat/completions', {
+      const response = await fetch('/local-api/chat/completions', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -3261,7 +3261,7 @@ Be thorough and comprehensive.`;
         headers['X-Title'] = document.title;
       }
 
-      const response = await fetch('http://192.168.88.50:1234/v1/chat/completions', {
+      const response = await fetch('/local-api/chat/completions', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -5164,7 +5164,7 @@ class AdvancedTTSPlayer {
   }
 
   async generateAvalaiTTS(text) {
-    const response = await fetch('http://192.168.88.50:4321/v1/audio/speech', {
+    const response = await fetch('/local-api/audio/speech', {
       method: 'POST',
       headers: { 
         'Authorization': `Bearer ${this.app.AVALAI_API_KEY}`, 
@@ -5225,7 +5225,7 @@ class AdvancedTTSPlayer {
     const voiceId = await this.app.getElevenLabsPreferredVoiceId('Brian');
     if (!voiceId) throw new Error('ElevenLabs voice "Brian" not found.');
 
-    const response = await fetch(`http://192.168.88.50:1234/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
       method: 'POST',
       headers: {
         'xi-api-key': this.app.ELEVENLABS_API_KEY,
