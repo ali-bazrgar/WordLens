@@ -3214,6 +3214,7 @@ Be thorough and comprehensive.`;
     const antonymsListEl = newPopup.querySelector("#antonyms-list");
     const closeBtn = newPopup.querySelector("#close-word-meaning");
     const playAudioBtn = newPopup.querySelector("#play-word-audio-btn");
+    const retryMeaningBtn = newPopup.querySelector("#retry-word-meaning-btn");
     const reviewWordBtn = newPopup.querySelector("#review-word-btn");
     const addToLeitnerBtn = newPopup.querySelector("#add-to-leitner-btn");
     
@@ -3295,44 +3296,112 @@ Be thorough and comprehensive.`;
     synonymsListEl.addEventListener('click', handleWordClick);
     antonymsListEl.addEventListener('click', handleWordClick);
 
-    // Fetch and render data
-    const meaningData = await this.getWordMeaning(word);
-    meaningsListEl.innerHTML = '';
-    if (meaningData.meanings && meaningData.meanings.length > 0 && meaningData.meanings[0].type !== "Error") {
-      meaningData.meanings.forEach(meaning => {
-        const div = document.createElement("div");
-        div.className = "meaning-item";
-        div.innerHTML = `<div class="meaning-text">${meaning.text}</div><span class="meaning-type">${meaning.type}</span>`;
-        meaningsListEl.appendChild(div);
-      });
-    } else {
-      const errorMessage = meaningData.meanings[0]?.text || "Meaning not found";
-      meaningsListEl.innerHTML = `<div class="meaning-item">${errorMessage}</div>`;
-    }
     const renderWordList = (listElement, wordList, itemClass) => {
-      listElement.innerHTML = '';
-      if (wordList && wordList.length > 0) {
+      listElement.replaceChildren();
+      if (Array.isArray(wordList) && wordList.length > 0) {
         wordList.forEach(itemWord => {
           const container = document.createElement("div");
           container.className = `${itemClass}-container`;
           const span = document.createElement("span");
           span.className = `${itemClass} clickable-word`;
-          span.textContent = itemWord;
+          span.textContent = String(itemWord ?? "");
           const button = document.createElement("button");
+          button.type = "button";
           button.className = "btn-icon btn-audio-word-item";
-          button.dataset.text = itemWord;
+          button.dataset.text = String(itemWord ?? "");
           button.title = `Play ${itemWord}`;
+          button.setAttribute("aria-label", `Play ${itemWord}`);
           button.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon></svg>`;
           container.appendChild(span);
           container.appendChild(button);
           listElement.appendChild(container);
         });
       } else {
-        listElement.innerHTML = `<span class="${itemClass}-item">${itemClass === 'synonym-item' ? 'No synonyms found' : 'No antonyms found'}</span>`;
+        const empty = document.createElement("span");
+        empty.className = `${itemClass}-item`;
+        empty.textContent = itemClass === 'synonym-item' ? 'No synonyms found' : 'No antonyms found';
+        listElement.appendChild(empty);
       }
     };
-    renderWordList(synonymsListEl, meaningData.synonyms, "synonym-item");
-    renderWordList(antonymsListEl, meaningData.antonyms, "antonym-item");
+
+    const renderMeaningData = (meaningData) => {
+      meaningsListEl.replaceChildren();
+      const meanings = Array.isArray(meaningData?.meanings) ? meaningData.meanings : [];
+      const isError = meanings.length === 0 || meanings[0]?.type === "Error";
+
+      if (isError) {
+        const error = document.createElement("div");
+        error.className = "meaning-item";
+        error.textContent = meanings[0]?.text || "Meaning not found";
+        meaningsListEl.appendChild(error);
+        renderWordList(synonymsListEl, [], "synonym-item");
+        renderWordList(antonymsListEl, [], "antonym-item");
+        return;
+      }
+
+      meanings.forEach(meaning => {
+        const div = document.createElement("div");
+        div.className = "meaning-item";
+        const textEl = document.createElement("div");
+        textEl.className = "meaning-text";
+        textEl.textContent = String(meaning?.text ?? "");
+        const typeEl = document.createElement("span");
+        typeEl.className = "meaning-type";
+        typeEl.textContent = String(meaning?.type ?? "");
+        div.appendChild(textEl);
+        div.appendChild(typeEl);
+        meaningsListEl.appendChild(div);
+      });
+
+      renderWordList(synonymsListEl, meaningData.synonyms, "synonym-item");
+      renderWordList(antonymsListEl, meaningData.antonyms, "antonym-item");
+    };
+
+    let meaningRequestVersion = 0;
+    const loadMeaning = async (forceRefresh = false) => {
+      const requestVersion = ++meaningRequestVersion;
+      if (retryMeaningBtn) {
+        retryMeaningBtn.disabled = true;
+        retryMeaningBtn.setAttribute("aria-busy", "true");
+        retryMeaningBtn.classList.toggle("is-loading", forceRefresh);
+        retryMeaningBtn.title = forceRefresh ? "Refreshing meaning…" : "Loading meaning…";
+      }
+
+      const loading = document.createElement("div");
+      loading.className = "meaning-item";
+      loading.textContent = forceRefresh ? "Getting a fresh meaning…" : "Loading meaning…";
+      meaningsListEl.replaceChildren(loading);
+      synonymsListEl.replaceChildren();
+      antonymsListEl.replaceChildren();
+
+      try {
+        const meaningData = await this.getWordMeaning(word, { forceRefresh });
+        if (!newPopup.isConnected || requestVersion !== meaningRequestVersion) return;
+        renderMeaningData(meaningData);
+      } catch (error) {
+        console.error("Failed to load word meaning:", error);
+        if (!newPopup.isConnected || requestVersion !== meaningRequestVersion) return;
+        const errorItem = document.createElement("div");
+        errorItem.className = "meaning-item";
+        errorItem.textContent = error?.message || "Unable to load the meaning. Please try again.";
+        meaningsListEl.replaceChildren(errorItem);
+        renderWordList(synonymsListEl, [], "synonym-item");
+        renderWordList(antonymsListEl, [], "antonym-item");
+      } finally {
+        if (newPopup.isConnected && requestVersion === meaningRequestVersion && retryMeaningBtn) {
+          retryMeaningBtn.disabled = false;
+          retryMeaningBtn.removeAttribute("aria-busy");
+          retryMeaningBtn.classList.remove("is-loading");
+          retryMeaningBtn.title = "Refresh meaning";
+        }
+      }
+    };
+
+    retryMeaningBtn?.addEventListener("click", () => {
+      void loadMeaning(true);
+    });
+
+    await loadMeaning(false);
   }
 
   playLeitnerCardAudio() { if (this.currentCard) { this.playTextToSpeech(this.currentCard.word, this.leitnerPlayAudioBtn, null, null); } }
