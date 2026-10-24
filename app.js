@@ -1223,9 +1223,7 @@ class AIChatApp {
       stability: Number.isFinite(winner?.stability) && winner.stability > 0 ? winner.stability : (Number.isFinite(existingCard?.stability) ? existingCard.stability : (incomingCard?.stability ?? null)),
       difficulty: Number.isFinite(winner?.difficulty) ? winner.difficulty : (Number.isFinite(existingCard?.difficulty) ? existingCard.difficulty : (incomingCard?.difficulty ?? null)),
       lapses: Math.max(Number(existingCard?.lapses) || 0, Number(incomingCard?.lapses) || 0),
-      lastReviewed,
-      status: mergedStatus,
-      learningStep: mergedLearningStep
+      lastReviewed
     };
   }
 
@@ -4523,7 +4521,7 @@ Be thorough and comprehensive.`;
         ...sourceCard,
         repetitions: previousReviews + 1,
         interval: result.interval,
-        easeFactor: cardAtRatingTime.easeFactor || 2.5,
+        easeFactor: sourceCard.easeFactor || 2.5,
         dueDate: nextDueDate.toISOString(),
         lastReviewed: reviewedAt.toISOString(),
         fsrsVersion: 6,
