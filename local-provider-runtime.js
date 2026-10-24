@@ -1095,6 +1095,16 @@
     for (const type of types) { try { if (MediaRecorder.isTypeSupported(type)) { selected = type; break; } } catch (_) {} }
     return selected ? new MediaRecorder(stream,{mimeType:selected}) : new MediaRecorder(stream);
   };
+  // This turn-based experience does not support barge-in. Muting the capture
+  // track while the reply is played prevents phone loudspeaker audio from
+  // becoming the next "user" turn, even when mobile AEC is ineffective.
+  const setRealtimeMicMuted = (session, muted) => {
+    if (!session?.stream) return;
+    session.micMuted = !!muted;
+    session.stream.getAudioTracks().forEach(track => {
+      if (track.readyState === 'live') track.enabled = !muted;
+    });
+  };
   const playRealtimeAudio = async (blob, session) => {
     if (!blob || !blob.size) throw new Error('TTS returned an empty audio file.');
 
@@ -1246,7 +1256,7 @@
         const Context=window.AudioContext||window.webkitAudioContext;if(!Context)throw new Error('Web Audio is not supported by this browser.');
         audioContext=new Context();await audioContext.resume();const analyser=audioContext.createAnalyser();analyser.fftSize=2048;analyser.smoothingTimeConstant=0.15;
         const source=audioContext.createMediaStreamSource(stream);source.connect(analyser);
-        const session={active:true,stream,audioContext,analyser,source,frameId:0,recorder:null,chunks:[],state:'listening',noiseFloor:0.002,threshold:0.012,speechStartedAt:0,lastVoiceAt:0,audio:null,audioStop:null};
+        const session={active:true,stream,audioContext,analyser,source,frameId:0,recorder:null,chunks:[],state:'listening',noiseFloor:0.002,threshold:0.012,speechStartedAt:0,lastVoiceAt:0,audio:null,audioStop:null,micMuted:false,micIgnoreUntil:0,quietSince:0,vadArmed:true};
         this.realtimeSession=session;
         if(this.realtimeBtn){this.realtimeBtn.disabled=false;this.realtimeBtn.classList.add('active');this.realtimeBtn.setAttribute('aria-pressed','true');this.realtimeBtn.title='Stop live conversation';this.realtimeBtn.setAttribute('aria-label','Stop live conversation');}
         if(this.voiceBtn)this.voiceBtn.disabled=true;realtimeSetStatus(this,'Listening — speak naturally, then pause briefly when you finish a turn.','listening');this.tickRealtimeConversation(session);
@@ -1267,7 +1277,15 @@
       try{
         const samples=new Float32Array(session.analyser.fftSize);session.analyser.getFloatTimeDomainData(samples);let squares=0;
         for(let i=0;i<samples.length;i++)squares+=samples[i]*samples[i];const rms=Math.sqrt(squares/samples.length),now=performance.now();
-        if(session.state==='listening'&&!this.isLoading){
+        if(session.state==='listening'&&(!session.vadArmed||now<session.micIgnoreUntil)){
+          // After TTS, require the speaker echo/tail to die away and a brief
+          // quiet interval before voice activity detection can start a new turn.
+          if(now<session.micIgnoreUntil){session.vadArmed=false;session.quietSince=0;}
+          else if(rms<Math.max(0.008,session.threshold*0.7)){
+            if(!session.quietSince)session.quietSince=now;
+            if(now-session.quietSince>=350){session.vadArmed=true;session.quietSince=0;}
+          }else session.quietSince=0;
+        }else if(session.state==='listening'&&!this.isLoading&&session.vadArmed){
           session.noiseFloor=rms<session.noiseFloor*3?session.noiseFloor*0.96+rms*0.04:session.noiseFloor;session.threshold=Math.max(0.012,session.noiseFloor*3.2);
           if(rms>session.threshold){
             try{
@@ -1303,7 +1321,20 @@
         const chat=this.chats.find(item=>item.id===this.currentChatId);
         if(chat&&chat.messages.length===2&&!String(chat.title||'').includes('(Imported)')){chat.title=transcript.substring(0,30)+(transcript.length>30?'...':'');this.saveChats();this.renderChatList();this.chatTitle.textContent=chat.title;}
         if(session.active&&this.realtimeSession===session&&answer.trim()){realtimeSetStatus(this,'Speaking…','speaking');
-          try{const audioBlob=await localTTS(answer);if(session.active&&this.realtimeSession===session)await playRealtimeAudio(audioBlob,session);}
+          try{
+            const audioBlob=await localTTS(answer);
+            if(session.active&&this.realtimeSession===session){
+              // The app is half-duplex: don't record the phone's own speaker.
+              session.vadArmed=false;session.quietSince=0;
+              setRealtimeMicMuted(session,true);
+              try{await playRealtimeAudio(audioBlob,session);}
+              finally{
+                setRealtimeMicMuted(session,false);
+                session.micIgnoreUntil=performance.now()+900;
+                session.quietSince=0;
+              }
+            }
+          }
           catch(ttsError){console.error('Realtime TTS error:',ttsError);session.lastError='Reply is in chat, but speech failed: '+ttsError.message;if(session.active){realtimeSetStatus(this,session.lastError,'error');this.showToast('Live TTS failed: '+ttsError.message,'error');}}
         }
       }catch(error){loadingWrapper.remove();console.error('Realtime LLM error:',error);this.addMessage('ai','Error: '+error.message);session.lastError='LLM error: '+error.message;if(session.active){realtimeSetStatus(this,session.lastError,'error');this.showToast(session.lastError,'error');}}
