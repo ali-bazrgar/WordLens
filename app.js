@@ -1046,6 +1046,55 @@ class AIChatApp {
     return d;
   }
 
+  normalizeFSRSState(card, lastReviewedFallback = null, repetitionsFallback = 0, intervalFallback = 0) {
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+    const nonNegativeInteger = value => Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : 0;
+    const toIso = value => {
+      if (!value) return null;
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? null : date.toISOString();
+    };
+    const raw = card && card.fsrs && typeof card.fsrs === "object" ? card.fsrs : null;
+    const validStates = new Set(["new", "learning", "review", "relearning"]);
+    if (raw && Number(raw.version) === 6 && Number.isFinite(Number(raw.stability)) && Number.isFinite(Number(raw.difficulty))) {
+      return {
+        version: 6,
+        stability: Math.max(0, Number(raw.stability)),
+        difficulty: clamp(Number(raw.difficulty), 1, 10),
+        state: validStates.has(raw.state) ? raw.state : "review",
+        reps: nonNegativeInteger(raw.reps ?? repetitionsFallback),
+        lapses: nonNegativeInteger(raw.lapses),
+        lastReview: toIso(raw.lastReview) || toIso(lastReviewedFallback),
+        scheduledDays: Math.max(0, Number.isFinite(Number(raw.scheduledDays)) ? Number(raw.scheduledDays) : Number(intervalFallback) || 0),
+        elapsedDays: Math.max(0, Number(raw.elapsedDays) || 0),
+        retrievability: clamp(Number.isFinite(Number(raw.retrievability)) ? Number(raw.retrievability) : 1, 0, 1),
+        desiredRetention: clamp(Number(raw.desiredRetention) || 0.9, 0.7, 0.99),
+        reviewLog: Array.isArray(raw.reviewLog) ? raw.reviewLog.slice(-50) : []
+      };
+    }
+
+    // Migrate legacy SM-2 records without losing their existing due dates or counters.
+    const reps = nonNegativeInteger(repetitionsFallback);
+    const interval = Math.max(0, Number(intervalFallback) || 0);
+    const easeFactor = clamp(Number(card?.easeFactor) || 2.5, 1.3, 2.5);
+    const legacyDifficulty = clamp(10 - ((easeFactor - 1.3) / 1.2) * 9, 1, 10);
+    const legacyStatus = String(card?.status || "").toLowerCase();
+    return {
+      version: 6,
+      stability: reps > 0 ? Math.max(0.1, interval || 1) : 0,
+      difficulty: reps > 0 ? legacyDifficulty : 5,
+      state: reps > 0 ? (legacyStatus === "learning" || legacyStatus === "relearning" ? legacyStatus : "review") : "new",
+      reps,
+      lapses: 0,
+      lastReview: toIso(lastReviewedFallback),
+      scheduledDays: interval,
+      elapsedDays: 0,
+      retrievability: 1,
+      desiredRetention: 0.9,
+      reviewLog: []
+    };
+  }
+
   normalizeLeitnerCardForStorage(card) {
     if (!card || typeof card !== 'object') return null;
     if (!card.id || typeof card.id !== 'string') return null;
@@ -1086,6 +1135,7 @@ class AIChatApp {
     const easeFactorRaw = Number.isFinite(card.easeFactor) ? card.easeFactor : 2.5;
     const easeFactor = Math.max(1.3, easeFactorRaw);
     const status = typeof card.status === 'string' ? card.status : (repetitions === 0 ? 'new' : 'review');
+    const fsrsState = this.normalizeFSRSState(card, lastReviewed, repetitions, interval);
 
     const fixedCard = {
       ...card,
@@ -1100,7 +1150,8 @@ class AIChatApp {
       interval,
       easeFactor,
       lastReviewed,
-      status
+      status,
+      fsrs: fsrsState
     };
 
     const needsWrite =
@@ -1113,7 +1164,8 @@ class AIChatApp {
       fixedCard.interval !== card.interval ||
       fixedCard.easeFactor !== card.easeFactor ||
       fixedCard.lastReviewed !== card.lastReviewed ||
-      fixedCard.status !== card.status;
+      fixedCard.status !== card.status ||
+      JSON.stringify(fixedCard.fsrs) !== JSON.stringify(card.fsrs);
 
     return { fixedCard, oldId: card.id, newId, needsWrite };
   }
@@ -1252,18 +1304,22 @@ class AIChatApp {
     this.updateLeitnerHighlights();
   }
 
+  isNewFSRSCard(card) {
+    if (!card) return false;
+    return card.fsrs ? card.fsrs.state === "new" : (card.repetitions || 0) === 0;
+  }
+
   evaluateCardDueState(card) {
-    if (!card) return { state: 'none' };
-    
-    const now = this.getMidnightLocal(new Date());
+    if (!card) return { state: "none" };
+    const now = new Date();
+    const todayStart = this.getMidnightLocal(now);
     const dueIso = this.coerceIsoDate(card.dueDate, card.createdAt);
-    const due = this.getMidnightLocal(dueIso) || (now ? new Date(now) : new Date());
-    
-    const isDue = now ? (due.getTime() <= now.getTime()) : true;
-    const overdue = now ? (due.getTime() < now.getTime()) : false;
-    
+    const dueDate = dueIso ? new Date(dueIso) : new Date(now);
+    if (Number.isNaN(dueDate.getTime())) return { state: "none", dueDate: dueIso, card };
+    const isDue = dueDate.getTime() <= now.getTime();
+    const overdue = !!todayStart && dueDate.getTime() < todayStart.getTime();
     return {
-      state: isDue ? (overdue ? 'overdue' : 'due') : (((card.repetitions || 0) === 0) ? 'new' : 'scheduled'),
+      state: isDue ? (overdue ? "overdue" : "due") : (this.isNewFSRSCard(card) ? "new" : "scheduled"),
       dueDate: dueIso,
       card
     };
