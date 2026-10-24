@@ -1513,9 +1513,15 @@
       session.turnSettled=turnSettled;
       session.resolveTurnSettled=resolveTurn;
       this.addMessage('user',transcript);
-      const loadingWrapper=document.createElement('div');loadingWrapper.className='message-wrapper ai';
-      const loadingDiv=document.createElement('div');loadingDiv.className='message ai';loadingDiv.innerHTML='<div class="typing-indicator"><span></span><span></span><span></span></div>';
-      loadingWrapper.appendChild(loadingDiv);this.messagesDiv.appendChild(loadingWrapper);this.scrollToBottom();this.isLoading=true;
+      const loadingWrapper=document.createElement('div');
+      loadingWrapper.className='message-wrapper ai';
+      const loadingDiv=document.createElement('div');
+      loadingDiv.className='message ai';
+      loadingDiv.innerHTML='<div class="typing-indicator"><span></span><span></span><span></span></div>';
+      loadingWrapper.appendChild(loadingDiv);
+      this.messagesDiv.appendChild(loadingWrapper);
+      this.scrollToBottom();
+      this.isLoading=true;
       try{
         session.state='thinking';
         realtimeSetStatus(this,'Thinking… speak any time to interrupt.','processing');
@@ -1524,18 +1530,68 @@
           : await this.callChatAPI(transcript);
         if(session.state==='barge-candidate'&&session.bargeCandidatePromise)await session.bargeCandidatePromise;
         if(!session.active||controller.signal.aborted||session.interruptedTurn){loadingWrapper.remove();return;}
-        loadingWrapper.remove();this.addMessage('ai',answer);
+        loadingWrapper.remove();
+        this.addMessage('ai',answer);
+
         const chat=this.chats.find(item=>item.id===this.currentChatId);
-        if(chat&&chat.messages.length===2&&!String(chat.title||'').includes('(Imported)')){chat.title=transcript.substring(0,30)+(transcript.length>30?'...':'');this.saveChats();this.renderChatList();this.chatTitle.textContent=chat.title;}
+        const assistantMessage=chat?.messages?.[chat.messages.length-1];
+        const assistantMessageId=assistantMessage?.role==='ai'?assistantMessage.id:null;
+        if(chat&&chat.messages.length===2&&!String(chat.title||'').includes('(Imported)')){
+          chat.title=transcript.substring(0,30)+(transcript.length>30?'...':'');
+          this.saveChats();
+          this.renderChatList();
+          this.chatTitle.textContent=chat.title;
+        }
+
         if(session.active&&this.realtimeSession===session&&answer.trim()){
           session.state='synthesizing';
           realtimeSetStatus(this,'Preparing speech… you can interrupt.','processing');
           const audioBlob=await localTTS(answer,{signal:controller.signal});
+          if(!audioBlob||!audioBlob.size)throw new Error('TTS returned an empty audio file.');
+
+          // Store the exact live-generated audio under the cache keys used by
+          // both the standard player and the local TTS adapter. Clicking the
+          // speaker later will replay this Blob instead of synthesizing again.
+          const model=getCfg('ttsModel')||DEFAULTS.ttsModel;
+          const voice=getCfg('ttsVoice')||DEFAULTS.ttsVoice;
+          const cacheEntries=[
+            {text:'full_'+answer,value:audioBlob},
+            {text:'full_local_pocket_tts_'+model+'_'+voice+'_'+String(answer??''),value:audioBlob}
+          ];
+          await Promise.all(cacheEntries.map(entry=>this.db.set('audio_cache',entry).catch(error=>{
+            console.debug('Live TTS audio cache write failed:',error);
+          })));
+
           if(session.state==='barge-candidate'&&session.bargeCandidatePromise)await session.bargeCandidatePromise;
           if(!session.active||controller.signal.aborted||session.interruptedTurn)return;
+
           session.state='speaking';
           realtimeSetStatus(this,'Speaking — talk to interrupt.','speaking');
-          await playRealtimeAudio(audioBlob,session,{signal:controller.signal});
+
+          const messageWrapper=assistantMessageId?document.getElementById(assistantMessageId):null;
+          const audioControls=messageWrapper?.querySelector('.audio-controls-container');
+          if(messageWrapper&&audioControls&&typeof AdvancedTTSPlayer!=='undefined'){
+            // Stop any other active player before connecting the live response.
+            this.activeTTSPlayers.forEach((otherPlayer,otherId)=>{
+              if(otherId!==assistantMessageId&&otherPlayer){
+                otherPlayer.cleanup();
+                this.activeTTSPlayers.delete(otherId);
+              }
+            });
+            const player=new AdvancedTTSPlayer(this);
+            this.activeTTSPlayers.set(assistantMessageId,player);
+            await player.playMessage(answer,assistantMessageId,audioControls,{
+              audioBlob,
+              realtimeSession:session
+            });
+            // Only the initial live playback participates in barge-in detection.
+            // Later speaker-button replays keep the same audio and normal controls.
+            player.realtimeSession=null;
+            if(!session.active||controller.signal.aborted||session.interruptedTurn)return;
+          }else{
+            // Defensive fallback if the message/player UI could not be created.
+            await playRealtimeAudio(audioBlob,session,{signal:controller.signal});
+          }
         }
       }catch(error){
         loadingWrapper.remove();
