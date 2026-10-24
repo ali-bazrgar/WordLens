@@ -3597,8 +3597,7 @@ Be thorough and comprehensive.`;
         cache: 'no-store',
         body: JSON.stringify({
           model: 'gpt-5-nano',
-          messages: [{ role: 'user', content: prompt }],
-          temperature: options.forceAlternative ? 0.95 : options.refresh ? 0.8 : 0.2
+          messages: [{ role: 'user', content: prompt }]
         })
       });
       if (!response.ok) throw new Error(`Avalai API error: ${response.status} - ${await response.text()}`);
