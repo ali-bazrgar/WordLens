@@ -28,10 +28,20 @@
     sttBase: { '': DEFAULTS.sttBase }
   });
 
+  const normalizeSttLanguage = (value) => {
+    const language = String(value ?? '').trim().toLowerCase();
+    return ['en', 'fa', 'auto'].includes(language) ? language : 'auto';
+  };
+
   const getCfg = (key) => {
     const stored = localStorage.getItem('wordlens_local_' + key);
     if (stored !== null) {
       const value = stored.toString().trim();
+      if (key === 'sttLanguage') {
+        const language = normalizeSttLanguage(value);
+        if (language !== value) setCfg(key, language);
+        return language;
+      }
       if (value === '/local-api' && ['llmBase', 'ttsBase', 'sttBase'].includes(key)) {
         const fallback = (DEFAULTS[key] ?? '').toString().trim();
         setCfg(key, fallback);
@@ -447,14 +457,17 @@
     const uploadBlob = isAvalai ? audioBlob : await toMonoWav16k(audioBlob);
     const mimeType = (uploadBlob.type || '').toLowerCase();
     const extension = mimeType.includes('wav') ? 'wav' : mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'm4a' : 'webm';
-    const language = getCfg('sttLanguage');
+    const language = normalizeSttLanguage(getCfg('sttLanguage'));
     const headers = { 'Accept': 'application/json, text/plain, */*' };
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
     const createForm = (includeModel) => {
       const form = new FormData();
       form.append('file', uploadBlob, 'recording.' + extension);
       if (includeModel) form.append('model', getCfg('sttModel') || 'whisper-1');
-      if (language && language.toLowerCase() !== 'auto') form.append('language', language);
+      // whisper.cpp inherits the language from its launch flags when the field
+      // is omitted. Always send "auto" to local endpoints to override a forced
+      // startup language such as -l fa; cloud-style Avalai expects omission for auto.
+      if (language !== 'auto' || !isAvalai) form.append('language', language);
       form.append('response_format', 'json');
       return form;
     };
@@ -685,7 +698,11 @@
       <label style="display:block;margin:8px 0 4px;">STT Model</label>
       <input type="text" id="local-stt-model" placeholder="whisper-1">
       <label style="display:block;margin:8px 0 4px;">STT Language</label>
-      <input type="text" id="local-stt-language" placeholder="en, fa, or auto">
+      <select id="local-stt-language">
+        <option value="en">English (en)</option>
+        <option value="fa">Persian / Farsi (fa)</option>
+        <option value="auto">Auto-detect (auto)</option>
+      </select>
       <div class="modal-buttons" style="margin-top:10px;">
         <button type="button" id="local-provider-test" class="btn-secondary">Test LLM + TTS</button>
         <button type="button" id="local-stt-test" class="btn-secondary">Test STT (4-second sample)</button>

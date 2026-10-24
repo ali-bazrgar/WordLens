@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>AI Chat</title>
-  <link rel="stylesheet" href="style.css?v=20261024-realtime-abort-qwen35-v21">
+  <link rel="stylesheet" href="style.css?v=20261024-stt-language-auto-v22">
   <link rel="manifest" href="manifest.json">
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
 </head>
@@ -479,13 +479,13 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="app.js?v=20261024-realtime-abort-qwen35-v21"></script>
+  <script src="app.js?v=20261024-stt-language-auto-v22"></script>
   <!-- Loaded explicitly so voice controls and API settings also work when app.js is served as a plain file. -->
-  <script src="local-provider-runtime.js?v=20261024-realtime-abort-qwen35-v21"></script>
+  <script src="local-provider-runtime.js?v=20261024-stt-language-auto-v22"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./service-worker.js?v=20261024-realtime-abort-qwen35-v21', { scope: './', updateViaCache: 'none' }).then(registration => {
+        navigator.serviceWorker.register('./service-worker.js?v=20261024-stt-language-auto-v22', { scope: './', updateViaCache: 'none' }).then(registration => {
           registration.update().catch(() => {});
           console.log('ServiceWorker registration successful with scope: ', registration.scope);
         }, err => {
