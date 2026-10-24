@@ -1161,22 +1161,6 @@
     };
 
     AIChatApp.prototype.playWithElevenLabsTTS = async function(text, button, progressBar) {
-      if (!button) return;
-      button.disabled = true;
-      button.classList.add('playing');
-      if (progressBar) this.updateProgress(progressBar, 0);
-      try {
-        const audioBlob = await localTTS(text);
-        await playLocalBlob(this, audioBlob, button, progressBar, text);
-        await this.db.set('audio_cache', { text, value: audioBlob }).catch(() => {});
-      } catch (error) {
-        console.error('Local Provider 3 TTS Error:', error);
-        button.classList.remove('playing');
-        button.disabled = false;
-        if (progressBar) this.updateProgress(progressBar, 0);
-        this.showToast(`Failed to generate speech with Local Provider 3: ${error.message}`, 'error');
-      }
-    AIChatApp.prototype.playWithElevenLabsTTS = async function(text, button, progressBar) {
       const spokenText = String(text ?? '').trim();
       if (!spokenText) return;
       const targetButton = button || document.createElement('button');
@@ -1193,12 +1177,20 @@
           ? this.getAudioCacheKey(spokenText)
           : spokenText.normalize('NFC').trim().replace(/\s+/g, ' ');
         // Persist before playback: rejected autoplay must not lose generated audio.
-        await this.db.set('audio_cache', {
-          text: cacheKey,
-          originalText: spokenText,
-          value: audioBlob,
-          savedAt: new Date().toISOString()
-        });
+        try {
+          await this.db.set('audio_cache', {
+            text: cacheKey,
+            originalText: spokenText,
+            value: audioBlob,
+            savedAt: new Date().toISOString()
+          });
+        } catch (storageError) {
+          console.warn('Could not persist local TTS audio; playback will continue:', storageError);
+          if (!this._audioCacheWarningShown) {
+            this._audioCacheWarningShown = true;
+            this.showToast('Audio is available, but browser storage could not save it. It may need to be generated again.', 'warning', 4500);
+          }
+        }
         await playLocalBlob(this, audioBlob, targetButton, progressBar, spokenText);
       } catch (error) {
         targetButton.classList.remove('playing');
