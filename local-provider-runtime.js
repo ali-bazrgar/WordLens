@@ -1155,6 +1155,12 @@
           console.warn('Could not read local TTS audio cache:', cacheError);
         }
 
+        // If no saved audio exists and the device is offline, avoid calling the
+        // local API proxy and use an installed browser speech voice as fallback.
+        if (typeof navigator !== 'undefined' && navigator.onLine === false &&
+            typeof this.playWithBrowserTTS === 'function') {
+          return this.playWithBrowserTTS(spokenText, targetButton, progressBar, messageId);
+        }
         return this.playWithElevenLabsTTS(spokenText, targetButton, progressBar);
       }
       return originalPlayTextToSpeech.call(this, text, button, progressBar, messageId);
