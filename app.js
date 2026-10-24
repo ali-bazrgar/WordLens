@@ -3407,7 +3407,26 @@ Be thorough and comprehensive.`;
   }
 
   scrollToBottom() {
-      this.messagesDiv.scrollTop = this.messagesDiv.scrollHeight;
+    // #messages is the content node; its .messages-container parent is the
+    // element that actually owns vertical scrolling on desktop and mobile.
+    const scroller = this.messagesDiv?.closest('.messages-container') || this.messagesDiv?.parentElement;
+    if (!scroller) return;
+
+    const scrollNow = () => {
+      scroller.scrollTop = scroller.scrollHeight;
+    };
+    scrollNow();
+
+    // Re-run after layout so newly wrapped text, action rows and mobile viewport
+    // changes are included. Coalesce rapid append calls while switching chats.
+    if (this._scrollBottomFrame) cancelAnimationFrame(this._scrollBottomFrame);
+    this._scrollBottomFrame = requestAnimationFrame(() => {
+      scrollNow();
+      this._scrollBottomFrame = requestAnimationFrame(() => {
+        scrollNow();
+        this._scrollBottomFrame = null;
+      });
+    });
   }
   
   // --- Leitner Functions ---
