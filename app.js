@@ -313,6 +313,7 @@ class AIChatApp {
     this.theme = localStorage.getItem("theme") || "light";
     this.fontSize = parseInt(localStorage.getItem("font_size")) || 14;
     this.boldText = localStorage.getItem("bold_text") === "true";
+    this.customInstructions = localStorage.getItem("custom_instructions") || "";
     this.chats = JSON.parse(localStorage.getItem("chats")) || [];
     try {
       this.documents = JSON.parse(localStorage.getItem("documents")) || [];
@@ -439,6 +440,7 @@ class AIChatApp {
     this.themeSelect = document.getElementById("theme-select");
     this.fontSizeSelect = document.getElementById("font-size-select");
     this.boldTextCheckbox = document.getElementById("bold-text-checkbox");
+    this.customInstructionsInput = document.getElementById("custom-instructions-input");
     this.saveSettingsBtn = document.getElementById("save-settings");
     this.cancelSettingsBtn = document.getElementById("cancel-settings");
     this.app = document.getElementById("app");
@@ -780,6 +782,7 @@ class AIChatApp {
     this.fontSizeSelect.value = this.fontSize;
     document.getElementById("font-size-value").textContent = this.fontSize;
     this.boldTextCheckbox.checked = this.boldText;
+    if (this.customInstructionsInput) this.customInstructionsInput.value = this.customInstructions || "";
     this.settingsModal.classList.remove("hidden");
   }
 
@@ -797,6 +800,7 @@ class AIChatApp {
     const theme = this.themeSelect.value;
     const fontSize = this.fontSizeSelect.value;
     const boldText = this.boldTextCheckbox.checked;
+    const customInstructions = (this.customInstructionsInput?.value || "").trim();
     
     localStorage.setItem("gemini_api_key", geminiKey);
     this.API_KEY = geminiKey;
@@ -821,6 +825,8 @@ class AIChatApp {
     localStorage.setItem("bold_text", boldText);
     this.boldText = boldText;
     this.applyBoldText(boldText);
+    localStorage.setItem("custom_instructions", customInstructions);
+    this.customInstructions = customInstructions;
     this.hideSettingsModal();
     this.showToast("Settings saved successfully!", "success");
   }
@@ -2664,7 +2670,7 @@ class AIChatApp {
     };
 
     try {
-      const response = await this.callChatAPI(text);
+      const response = await this.callChatAPI(text, requestChatId);
       loadingWrapper.remove();
       const originChat = this.chats.find(chat => chat.id === requestChatId);
       if (this.currentChatId === requestChatId) {
@@ -2701,61 +2707,129 @@ class AIChatApp {
       }
     }
   }
-  async callChatAPI(message) {
-    if (this.chatProvider === 'gemini') return this.callGeminiChatAPI(message);
-    else if (this.chatProvider === 'avalai') return this.callAvalaiChatAPI(message);
-    else if (this.chatProvider === 'openrouter') return this.callOpenRouterChatAPI(message);
-    else throw new Error("No chat provider selected or API key is missing.");
+  getEffectiveSystemInstructions() {
+    const defaults = [
+      "You are WordLens, a capable and thoughtful general-purpose assistant.",
+      "Reply in the same language as the user's latest message unless the user asks for another language.",
+      "Honor the requested content type, tone, format, and length. If the user asks for a long essay, story, article, comprehensive explanation, or a specific word/page count, provide a genuinely substantial answer rather than a few short paragraphs. Do not arbitrarily shorten a requested long response.",
+      "Use valid, renderable CommonMark Markdown for structured answers. Put a space after Markdown heading markers, for example '# Hello' and '## Introduction'; leave blank lines around headings, lists, block quotes, and fenced code blocks; use '- ' for unordered list items; and format tables with a valid header and separator row.",
+      "Write actual Markdown syntax, not HTML-encoded spaces such as '&#x20;' and not backslash-escaped heading or list markers. Do not wrap ordinary answers in a code fence. Only provide raw Markdown source when explicitly requested.",
+      "Keep simple answers appropriately concise, but never let concision override a clear request for depth or length. If a response is legitimately cut off by a platform limit, make that clear rather than pretending the answer is complete."
+    ].join("\n");
+    const custom = (this.customInstructions || "").trim();
+    return custom
+      ? `${defaults}\n\nAdditional user preferences (apply when compatible with the current request):\n${custom}`
+      : defaults;
   }
 
-  async callGeminiChatAPI(message) {
+  getConversationHistory(chat, currentMessage) {
+    const history = (Array.isArray(chat?.messages) ? chat.messages : [])
+      .filter(item => item && item.role !== "system")
+      .map(item => ({ ...item }));
+    const last = history[history.length - 1];
+    // sendMessage() stores the new user message before requesting a reply.
+    // Remove that one copy here because the current message is appended below.
+    if (
+      last &&
+      last.role === "user" &&
+      String(last.content ?? "").trim() === String(currentMessage ?? "").trim()
+    ) {
+      history.pop();
+    }
+    return history.slice(-10);
+  }
+
+  async callChatAPI(message, chatId = this.currentChatId) {
+    if (this.chatProvider === 'gemini') return this.callGeminiChatAPI(message, chatId);
+    if (this.chatProvider === 'avalai') return this.callAvalaiChatAPI(message, chatId);
+    if (this.chatProvider === 'openrouter') return this.callOpenRouterChatAPI(message, chatId);
+    throw new Error("No chat provider selected or API key is missing.");
+  }
+
+  async callGeminiChatAPI(message, chatId = this.currentChatId) {
     if (!this.API_KEY) throw new Error("Provider 1 API key is not set.");
-    const chat = this.chats.find(c => c.id === this.currentChatId);
+    const chat = this.chats.find(item => item.id === chatId);
     if (!chat) throw new Error("Chat not found");
-    const history = chat.messages.filter(msg => msg.role !== "system").slice(-10).map(msg => ({
-      role: msg.role === "user" ? "user" : "model",
-      parts: [{ text: msg.content }]
+    const history = this.getConversationHistory(chat, message).map(item => ({
+      role: item.role === "user" ? "user" : "model",
+      parts: [{ text: String(item.content ?? "") }]
     }));
-    const requestBody = { contents: [...history, { role: "user", parts: [{ text: message }] }] };
+    const requestBody = {
+      systemInstruction: { parts: [{ text: this.getEffectiveSystemInstructions() }] },
+      contents: [...history, { role: "user", parts: [{ text: message }] }],
+      generationConfig: { maxOutputTokens: 8192, temperature: 0.7 }
+    };
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${this.API_KEY}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody)
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody)
     });
-    if (!response.ok) { const errorText = await response.text(); throw new Error(`Provider 1 API Error: ${response.status}, ${errorText}`); }
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Provider 1 API Error: ${response.status}, ${errorText}`);
+    }
     const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "Sorry, I couldn't get a response from Provider 1.";
+    const answer = data.candidates?.[0]?.content?.parts
+      ?.map(part => typeof part.text === "string" ? part.text : "")
+      .join("") || "";
+    if (!answer.trim()) {
+      const reason = data.candidates?.[0]?.finishReason;
+      throw new Error(reason ? `Provider 1 returned no visible text (finish reason: ${reason}).` : "Provider 1 returned an empty response.");
+    }
+    return answer;
   }
 
-  async callAvalaiChatAPI(message) {
+  async callAvalaiChatAPI(message, chatId = this.currentChatId) {
     if (!this.AVALAI_API_KEY) throw new Error("Provider 2 API key is not set.");
-    const chat = this.chats.find(c => c.id === this.currentChatId);
+    const chat = this.chats.find(item => item.id === chatId);
     if (!chat) throw new Error("Chat not found");
-    const history = chat.messages.filter(msg => msg.role !== "system").slice(-10).map(msg => ({
-      role: msg.role === "user" ? "user" : "assistant", content: msg.content
+    const history = this.getConversationHistory(chat, message).map(item => ({
+      role: item.role === "user" ? "user" : "assistant",
+      content: String(item.content ?? "")
     }));
-    const requestBody = { model: "gpt-5-nano", messages: [...history, { role: "user", content: message }] };
+    const requestBody = {
+      model: "gpt-5-nano",
+      messages: [
+        { role: "system", content: this.getEffectiveSystemInstructions() },
+        ...history,
+        { role: "user", content: message }
+      ],
+      max_completion_tokens: 8192
+    };
     const response = await fetch('https://api.avalai.ir/v1/chat/completions', {
-      method: 'POST', headers: { 'Authorization': `Bearer ${this.AVALAI_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.AVALAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestBody)
     });
-    if (!response.ok) { const errorText = await response.text(); throw new Error(`Provider 2 API Error: ${response.status}, ${errorText}`); }
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Provider 2 API Error: ${response.status}, ${errorText}`);
+    }
     const data = await response.json();
-    return data.choices?.[0]?.message?.content || "Sorry, I couldn't get a response from Provider 2.";
+    const answer = data.choices?.[0]?.message?.content;
+    if (typeof answer !== "string" || !answer.trim()) {
+      throw new Error("Provider 2 returned an empty response.");
+    }
+    return answer;
   }
 
-  async callOpenRouterChatAPI(message) {
+  async callOpenRouterChatAPI(message, chatId = this.currentChatId) {
     if (!this.OPENROUTER_API_KEY) throw new Error("OpenRouter API key is not set.");
-    const chat = this.chats.find(c => c.id === this.currentChatId);
+    const chat = this.chats.find(item => item.id === chatId);
     if (!chat) throw new Error("Chat not found");
 
-    const history = chat.messages
-      .filter(msg => msg.role !== "system")
-      .slice(-10)
-      .map(msg => ({ role: msg.role === "user" ? "user" : "assistant", content: msg.content }));
-
+    const history = this.getConversationHistory(chat, message).map(item => ({
+      role: item.role === "user" ? "user" : "assistant",
+      content: String(item.content ?? "")
+    }));
     const headers = {
       'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
       'Content-Type': 'application/json'
     };
-    // Optional OpenRouter attribution headers; avoid invalid values on file://
+    // Optional OpenRouter attribution headers; avoid invalid values on file://.
     if (typeof location !== 'undefined' && location.origin && location.origin !== 'null') {
       headers['HTTP-Referer'] = location.origin;
     }
@@ -2765,9 +2839,14 @@ class AIChatApp {
 
     const requestBody = {
       model: 'gemma-4-e2b-it',
-      messages: [...history, { role: 'user', content: message }],
+      messages: [
+        { role: 'system', content: this.getEffectiveSystemInstructions() },
+        ...history,
+        { role: 'user', content: message }
+      ],
+      max_completion_tokens: 8192,
+      temperature: 0.7,
       // Free variants may require permissive data-policy routing.
-      // If the account-wide privacy setting is more restrictive, the user must change it in OpenRouter settings.
       provider: { data_collection: 'allow' }
     };
 
@@ -2789,27 +2868,32 @@ class AIChatApp {
           `به https://openrouter.ai/settings/privacy بروید و گزینه/سیاست مربوط به «Free model publication» یا Data Policy را طوری تنظیم کنید که اجازه بدهد (Allow).`
         );
       }
-
       throw new Error(`OpenRouter API Error: ${response.status}, ${errorText}`);
     }
     const data = await response.json();
-    return data.choices?.[0]?.message?.content || "Sorry, I couldn't get a response from OpenRouter.";
+    const answer = data.choices?.[0]?.message?.content;
+    if (typeof answer !== "string" || !answer.trim()) {
+      throw new Error("OpenRouter returned an empty response.");
+    }
+    return answer;
   }
 
   // ---------- Dictionary / Translation ----------
-  async getWordMeaning(word) {
-    if (this.chatProvider === 'avalai') return this.getWordMeaningAvalai(word);
-    if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word);
-    return this.getWordMeaningGemini(word);
+  async getWordMeaning(word, { forceRefresh = false } = {}) {
+    if (this.chatProvider === 'avalai') return this.getWordMeaningAvalai(word, { forceRefresh });
+    if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word, { forceRefresh });
+    return this.getWordMeaningGemini(word, { forceRefresh });
   }
 
-  async getWordMeaningOpenRouter(word) {
+  async getWordMeaningOpenRouter(word, { forceRefresh = false } = {}) {
     const lowerWord = word.toLowerCase().trim();
-    try {
-      const cachedMeaning = await this.db.get('word_meanings', lowerWord);
-      if (cachedMeaning) return cachedMeaning.value;
-    } catch (err) {
-      console.error("Error reading meaning cache:", err);
+    if (!forceRefresh) {
+      try {
+        const cachedMeaning = await this.db.get('word_meanings', lowerWord);
+        if (cachedMeaning) return cachedMeaning.value;
+      } catch (err) {
+        console.error("Error reading meaning cache:", err);
+      }
     }
 
     if (!this.OPENROUTER_API_KEY) {
@@ -2973,9 +3057,16 @@ Be thorough and comprehensive.`;
     }
   }
 
-  async getWordMeaningAvalai(word) {
+  async getWordMeaningAvalai(word, { forceRefresh = false } = {}) {
     const lowerWord = word.toLowerCase().trim();
-    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (cachedMeaning) return cachedMeaning.value; } catch (err) { console.error("Error reading meaning cache:", err); }
+    if (!forceRefresh) {
+      try {
+        const cachedMeaning = await this.db.get('word_meanings', lowerWord);
+        if (cachedMeaning) return cachedMeaning.value;
+      } catch (err) {
+        console.error("Error reading meaning cache:", err);
+      }
+    }
     if (!this.AVALAI_API_KEY) return { meanings: [{ text: `No Provider 2 API Key`, type: "Error" }], synonyms: [], antonyms: [] };
     
     const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
@@ -3038,9 +3129,16 @@ Be thorough and comprehensive.`;
     }
   }
 
-  async getWordMeaningGemini(word) {
+  async getWordMeaningGemini(word, { forceRefresh = false } = {}) {
     const lowerWord = word.toLowerCase().trim();
-    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (cachedMeaning) { return cachedMeaning.value; } } catch (err) { console.error("Error reading meaning cache:", err); }
+    if (!forceRefresh) {
+      try {
+        const cachedMeaning = await this.db.get('word_meanings', lowerWord);
+        if (cachedMeaning) return cachedMeaning.value;
+      } catch (err) {
+        console.error("Error reading meaning cache:", err);
+      }
+    }
     if (!this.API_KEY) return { meanings: [{ text: `No API Key`, type: "Error" }], synonyms: [], antonyms: [] };
     
     const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
@@ -4131,7 +4229,8 @@ Be thorough and comprehensive.`;
           avalai_api_key: this.AVALAI_API_KEY || '',
           openrouter_api_key: this.OPENROUTER_API_KEY || '',
           elevenlabs_api_key: this.ELEVENLABS_API_KEY || '',
-          elevenlabs_voice_id: this.ELEVENLABS_VOICE_ID || ''
+          elevenlabs_voice_id: this.ELEVENLABS_VOICE_ID || '',
+          custom_instructions: this.customInstructions || ''
         },
         indexedDB: {
           word_meanings: wordMeanings || [],
@@ -4281,6 +4380,11 @@ Be thorough and comprehensive.`;
           localStorage.setItem('theme', this.theme);
           this.applyTheme(this.theme);
           if (this.themeSelect) this.themeSelect.value = this.theme;
+        }
+        if (typeof localData.custom_instructions === 'string') {
+          this.customInstructions = localData.custom_instructions;
+          localStorage.setItem('custom_instructions', this.customInstructions);
+          if (this.customInstructionsInput) this.customInstructionsInput.value = this.customInstructions;
         }
         if (typeof localData.gemini_api_key === 'string') {
           this.API_KEY = localData.gemini_api_key;
