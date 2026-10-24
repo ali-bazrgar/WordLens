@@ -519,11 +519,16 @@
     }
   };
 
-  const playLocalBlob = async (app, audioBlob, button, progressBar) => {
+  const playLocalBlob = async (app, audioBlob, button, progressBar, spokenText = '') => {
     if (!audioBlob || !audioBlob.size) throw new Error('Empty local audio blob.');
 
+    const text = String(spokenText ?? '').trim();
+    const tokenCount = text ? text.split(/\s+/).filter(Boolean).length : 0;
     const audioUrl = URL.createObjectURL(audioBlob);
     const audio = new Audio(audioUrl);
+    audio.playbackRate = tokenCount > 0 && tokenCount <= 2 && text.length <= 64 ? 0.78 : 1;
+    try { audio.preservesPitch = true; } catch (_) {}
+    try { audio.webkitPreservesPitch = true; } catch (_) {}
 
     if (button) {
       button.disabled = true;
@@ -828,19 +833,35 @@
       }
     };
 
-    AIChatApp.prototype.callOpenRouterChatAPI = async function(message, requestOptions = {}) {
+    AIChatApp.prototype.callOpenRouterChatAPI = async function(message, chatIdOrOptions = this.currentChatId, requestOptions = {}) {
+      // The chat UI passes a chat ID, while the realtime voice path passes { signal }.
+      // Keep both call styles working and never treat an options object as a chat ID.
+      let chatId = chatIdOrOptions;
+      if (chatIdOrOptions && typeof chatIdOrOptions === 'object') {
+        requestOptions = chatIdOrOptions;
+        chatId = this.currentChatId;
+      }
+      if (!chatId) chatId = this.currentChatId;
       if (this.chatProvider !== 'openrouter') throw new Error('Provider 3 is not selected.');
-      const chat = this.chats.find(c => c.id === this.currentChatId);
+      const chat = this.chats.find(c => c.id === chatId);
       if (!chat) throw new Error('Chat not found');
-      const history = chat.messages
-        .filter(msg => msg.role !== 'system')
-        .slice(-10)
-        .map(msg => ({ role: msg.role === 'user' ? 'user' : 'assistant', content: msg.content }));
-      // sendMessage() already appends the user's message before calling the model.
-      // Avoid repeating that same final user message in the prompt.
-      const last = history[history.length - 1];
-      if (last?.role === 'user' && String(last.content ?? '') === String(message ?? '')) history.pop();
-      return localCompletion(history.concat([{ role: 'user', content: message }]), {}, requestOptions);
+
+      const history = this.getConversationHistory(chat, message).map(msg => ({
+        role: msg.role === 'user' ? 'user' : 'assistant',
+        content: String(msg.content ?? '')
+      }));
+      const systemPrompt = typeof this.getEffectiveSystemInstructions === 'function'
+        ? this.getEffectiveSystemInstructions()
+        : [
+            'You are WordLens, a helpful assistant. Reply in the user’s language unless asked otherwise.',
+            'Use valid CommonMark Markdown. Structure multi-part answers with headings, lists or numbered steps as appropriate; use fenced code blocks for code.'
+          ].join('\n');
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        ...history,
+        { role: 'user', content: String(message ?? '') }
+      ];
+      return localCompletion(messages, { temperature: 0.7, max_tokens: 8192 }, requestOptions);
     };
 
     AIChatApp.prototype.translateTextOpenRouter = async function(text, options = {}) {
@@ -870,7 +891,7 @@
       }
     };
 
-    AIChatApp.prototype.getWordMeaningOpenRouter = async function(word) {
+    AIChatApp.prototype.getWordMeaningOpenRouter = async function(word, { forceRefresh = false } = {}) {
       const lowerWord = String(word ?? '').toLowerCase().trim();
       if (!lowerWord) {
         return { meanings: [{ text: 'No word selected.', type: 'Error' }], synonyms: [], antonyms: [] };
@@ -958,14 +979,15 @@
       };
 
       try {
-        // Normalize and cap previously cached values too, so old oversized
-        // dictionaries cannot bypass the new limits.
+        // Read cache for ordinary lookups; on refresh, retain it only as a comparison
+        // reference so an explicit click never returns the old answer without a new request.
+        let previousCachedResult = null;
         try {
           const cached = await this.db.get('word_meanings', lowerWord);
-          const cachedResult = normalizeMeaningResult(cached?.value);
-          if (cachedResult) {
-            await this.db.set('word_meanings', { word: lowerWord, value: cachedResult }).catch(() => {});
-            return cachedResult;
+          previousCachedResult = normalizeMeaningResult(cached?.value);
+          if (previousCachedResult && !forceRefresh) {
+            await this.db.set('word_meanings', { word: lowerWord, value: previousCachedResult }).catch(() => {});
+            return previousCachedResult;
           }
         } catch (error) {
           console.debug('Local dictionary cache read failed:', error);
@@ -975,6 +997,10 @@
         const prompt =
           'You are a precise English-to-Persian learner dictionary. Analyze only the English word or short expression below.\n' +
           'WORD: ' + wordJson + '\n\n' +
+          (forceRefresh
+            ? 'REFRESH MODE: Re-evaluate this word in a fresh independent pass. Provide a genuinely useful alternative set/order of accurate Persian glosses when possible. Do not copy the previous result verbatim, but do not invent or distort meanings merely to make the answer different.\n' +
+              'PREVIOUS RESULT (comparison reference only): ' + JSON.stringify(previousCachedResult || null) + '\n\n'
+            : '') +
           'Return one JSON object only, with exactly these keys and no other text:\n' +
           '{"meanings":[{"text":"معنی فارسی","type":"اسم/فعل/صفت/قید/حرف اضافه/حرف ربط/حرف ندا"},{"text":"معنی فارسی دوم","type":"نوع کلمه"}],"synonyms":["English synonym"],"antonyms":["English antonym"]}\n\n' +
           'Rules (must follow):\n' +
@@ -987,7 +1013,7 @@
           '- Use JSON double quotes, valid escaping, arrays, commas and closing braces. No trailing commas, Markdown, code fences, comments or prose.';
 
         const jsonOptions = {
-          temperature: 0,
+          temperature: forceRefresh ? 0.7 : 0,
           max_tokens: 320,
           response_format: { type: 'json_object' }
         };
@@ -1022,6 +1048,48 @@
             return localCompletion([{ role: 'user', content: repairPrompt }], { temperature: 0, max_tokens: 320 });
           });
           result = normalizeMeaningResult(parseJsonObject(repair));
+        }
+
+        const meaningSignature = value => JSON.stringify({
+          meanings: (value?.meanings || []).map(item => String(item?.text ?? '').trim().toLowerCase().replace(/\s+/g, ' ')),
+          synonyms: (value?.synonyms || []).map(item => String(item ?? '').trim().toLowerCase()),
+          antonyms: (value?.antonyms || []).map(item => String(item ?? '').trim().toLowerCase())
+        });
+
+        // Some local models tend to repeat deterministic JSON. If a refresh is
+        // equivalent to the cached result, make one stronger alternative attempt.
+        if (
+          forceRefresh && previousCachedResult && result &&
+          meaningSignature(result) === meaningSignature(previousCachedResult)
+        ) {
+          const alternativePrompt = [
+            'Perform a second independent dictionary pass for this exact English word.',
+            'Return only valid JSON with meanings (1-5 Persian glosses), synonyms (0-3 English items), and antonyms (0-3 English items).',
+            'Keep every entry accurate. Prefer another common Persian wording or a different helpful ordering instead of copying the prior entry.',
+            'WORD: ' + wordJson,
+            'PREVIOUS RESULT TO AVOID COPYING VERBATIM: ' + JSON.stringify(previousCachedResult)
+          ].join('\n');
+          let alternativeRaw = '';
+          try {
+            alternativeRaw = await localCompletion([{ role: 'user', content: alternativePrompt }], {
+              temperature: 0.85, max_tokens: 320, response_format: { type: 'json_object' }
+            });
+          } catch (alternativeError) {
+            if (/response.?format|json.?object|unsupported|unknown.*parameter|invalid.*parameter/i.test(alternativeError.message || '')) {
+              alternativeRaw = await localCompletion([{ role: 'user', content: alternativePrompt }], {
+                temperature: 0.85, max_tokens: 320
+              }).catch(error => {
+                console.warn('Alternative meaning refresh retry failed:', error);
+                return '';
+              });
+            } else {
+              console.warn('Alternative meaning refresh retry failed:', alternativeError);
+            }
+          }
+          const alternativeResult = normalizeMeaningResult(parseJsonObject(alternativeRaw));
+          if (alternativeResult && meaningSignature(alternativeResult) !== meaningSignature(previousCachedResult)) {
+            result = alternativeResult;
+          }
         }
 
         if (!result) {
@@ -1069,7 +1137,7 @@
       if (progressBar) this.updateProgress(progressBar, 0);
       try {
         const audioBlob = await localTTS(text);
-        await playLocalBlob(this, audioBlob, button, progressBar);
+        await playLocalBlob(this, audioBlob, button, progressBar, text);
         await this.db.set('audio_cache', { text, value: audioBlob }).catch(() => {});
       } catch (error) {
         console.error('Local Provider 3 TTS Error:', error);
@@ -1125,7 +1193,7 @@
         if (this.app?.ttsProvider === 'elevenlabs') {
           try {
             const audioBlob = await localTTS(text);
-            await playLocalBlob(this.app, audioBlob, button, progressBar);
+            await playLocalBlob(this.app, audioBlob, button, progressBar, text);
             await this.app.db.set('audio_cache', { text, value: audioBlob }).catch(() => {});
           } catch (error) {
             console.error('Local Provider 3 Advanced TTS Error:', error);
