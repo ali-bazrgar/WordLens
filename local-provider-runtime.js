@@ -1000,7 +1000,7 @@
               typeof item === 'string' ? item : String(item?.text ?? '')
             ).trim();
             if (!text || /^(?:error|خطا)$/i.test(String(item?.type ?? '').trim())) return false;
-            return !/[\\u0600-\\u06FF\\u0750-\\u077F\\u08A0-\\u08FF]/u.test(text);
+            return !/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/u.test(text);
           });
 
         // Automatically correct a language-violating first response instead of
