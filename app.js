@@ -327,6 +327,8 @@ class AIChatApp {
     this.activeSidebarSection = "chat";
     this.isLoading = false;
     this.selectedText = "";
+    this.currentTranslationSource = "";
+    this.translationRequestVersion = 0;
     this.selectionTimeout = null;
     this.currentUtterance = null;
     this.db = new CacheDB();
@@ -463,6 +465,7 @@ class AIChatApp {
     this.translatedTextEl = document.getElementById("translated-text");
     this.closeTranslationBtn = document.getElementById("close-translation");
     this.playTranslationAudioBtn = document.getElementById("play-translation-audio-btn");
+    this.retryTranslationBtn = document.getElementById("retry-translation-btn");
     this.sidebar = document.querySelector(".sidebar");
     this.translateSelectionBtn = document.getElementById("translate-selection-btn");
     this.leitnerModal = document.getElementById("leitner-modal");
@@ -562,6 +565,7 @@ class AIChatApp {
     
     this.closeTranslationBtn.addEventListener("click", () => this.hidePopup(this.translationPopup));
     this.playTranslationAudioBtn.addEventListener("click", () => this.playTranslationAudio());
+    this.retryTranslationBtn?.addEventListener("click", () => this.refreshTranslation());
     this.translationPopup.addEventListener("click", (e) => { if (e.target === this.translationPopup) this.hidePopup(this.translationPopup); });
 
     this.messagesDiv.addEventListener("click", (e) => {
@@ -3610,12 +3614,50 @@ Be thorough and comprehensive.`;
   }
 
   async showTranslationPopup(text) {
-    if (!text.trim()) return;
-    this.originalTextEl.textContent = text;
-    this.translatedTextEl.textContent = "Translating...";
+    const sourceText = String(text ?? "").trim();
+    if (!sourceText) return;
+
+    this.currentTranslationSource = sourceText;
+    this.originalTextEl.textContent = sourceText;
     this.showPopup(this.translationPopup);
-    try { const translation = await this.translateText(text); this.translatedTextEl.textContent = translation; }
-    catch { this.translatedTextEl.textContent = "Translation failed"; }
+    await this.loadTranslationIntoPopup(sourceText, false);
+  }
+
+  async refreshTranslation() {
+    const sourceText = String(this.currentTranslationSource || this.originalTextEl?.textContent || "").trim();
+    if (!sourceText) return;
+    // Translation does not use a local result cache: this makes a new provider request.
+    await this.loadTranslationIntoPopup(sourceText, true);
+  }
+
+  async loadTranslationIntoPopup(sourceText, isRefresh = false) {
+    const requestVersion = ++this.translationRequestVersion;
+    const refreshButton = this.retryTranslationBtn;
+
+    if (refreshButton) {
+      refreshButton.disabled = true;
+      refreshButton.setAttribute("aria-busy", "true");
+      refreshButton.classList.add("is-loading");
+      refreshButton.title = isRefresh ? "Refreshing translation…" : "Translation in progress…";
+    }
+    this.translatedTextEl.textContent = isRefresh ? "Generating a new translation…" : "Translating…";
+
+    try {
+      const translation = await this.translateText(sourceText);
+      if (requestVersion !== this.translationRequestVersion) return;
+      this.translatedTextEl.textContent = String(translation ?? "Translation failed");
+    } catch (error) {
+      if (requestVersion !== this.translationRequestVersion) return;
+      console.error("Failed to generate translation:", error);
+      this.translatedTextEl.textContent = error?.message || "Translation failed";
+    } finally {
+      if (requestVersion === this.translationRequestVersion && refreshButton) {
+        refreshButton.disabled = false;
+        refreshButton.removeAttribute("aria-busy");
+        refreshButton.classList.remove("is-loading");
+        refreshButton.title = "Generate translation again";
+      }
+    }
   }
   
   async renameChat() {
