@@ -1091,27 +1091,20 @@ class AIChatApp {
     }
 
     const repetitions = Number.isFinite(card.repetitions) ? Math.max(0, Math.floor(card.repetitions)) : 0;
-    const interval = Number.isFinite(card.interval) ? Math.max(0, Math.floor(card.interval)) : 0;
+    const fsrsVersion = Number.isFinite(card.fsrsVersion) ? Math.max(0, Math.floor(card.fsrsVersion)) : 0;
+    const intervalRaw = Number.isFinite(card.interval) ? Math.max(0, card.interval) : 0;
+    const interval = fsrsVersion >= 6 ? intervalRaw : Math.floor(intervalRaw);
     const easeFactorRaw = Number.isFinite(card.easeFactor) ? card.easeFactor : 2.5;
     const easeFactor = Math.max(1.3, easeFactorRaw);
+    const stability = Number.isFinite(card.stability) && card.stability > 0 ? card.stability : null;
+    const difficulty = Number.isFinite(card.difficulty) ? Math.min(10, Math.max(1, card.difficulty)) : null;
+    const lapses = Number.isFinite(card.lapses) ? Math.max(0, Math.floor(card.lapses)) : 0;
     const status = typeof card.status === 'string' ? card.status : (repetitions === 0 ? 'new' : 'review');
-
     const fixedCard = {
-      ...card,
-      id: newId,
-      word: normalizedWord,
-      scopeType,
-      scopeId,
-      scopeKey,
-      createdAt,
-      dueDate,
-      repetitions,
-      interval,
-      easeFactor,
-      lastReviewed,
-      status
+      ...card, id: newId, word: normalizedWord, scopeType, scopeId, scopeKey,
+      createdAt, dueDate, repetitions, interval, easeFactor, lastReviewed,
+      fsrsVersion, stability, difficulty, lapses, status
     };
-
     const needsWrite =
       fixedCard.id !== card.id ||
       fixedCard.word !== card.word ||
@@ -1122,6 +1115,10 @@ class AIChatApp {
       fixedCard.interval !== card.interval ||
       fixedCard.easeFactor !== card.easeFactor ||
       fixedCard.lastReviewed !== card.lastReviewed ||
+      fixedCard.fsrsVersion !== card.fsrsVersion ||
+      fixedCard.stability !== card.stability ||
+      fixedCard.difficulty !== card.difficulty ||
+      fixedCard.lapses !== card.lapses ||
       fixedCard.status !== card.status;
 
     return { fixedCard, oldId: card.id, newId, needsWrite };
@@ -1174,8 +1171,12 @@ class AIChatApp {
       createdAt,
       dueDate,
       repetitions: Math.max(existingRep, incomingRep),
-      interval: intervalDays,
+      interval: Number.isFinite(winner?.fsrsVersion) && winner.fsrsVersion >= 6 && Number.isFinite(winner?.interval) ? winner.interval : intervalDays,
       easeFactor: Math.max(1.3, Number.isFinite(winner?.easeFactor) ? winner.easeFactor : 2.5),
+      fsrsVersion: Math.max(Number(existingCard?.fsrsVersion) || 0, Number(incomingCard?.fsrsVersion) || 0),
+      stability: Number.isFinite(winner?.stability) && winner.stability > 0 ? winner.stability : (Number.isFinite(existingCard?.stability) ? existingCard.stability : (incomingCard?.stability ?? null)),
+      difficulty: Number.isFinite(winner?.difficulty) ? winner.difficulty : (Number.isFinite(existingCard?.difficulty) ? existingCard.difficulty : (incomingCard?.difficulty ?? null)),
+      lapses: Math.max(Number(existingCard?.lapses) || 0, Number(incomingCard?.lapses) || 0),
       lastReviewed
     };
   }
@@ -1263,14 +1264,12 @@ class AIChatApp {
 
   evaluateCardDueState(card) {
     if (!card) return { state: 'none' };
-    
-    const now = this.getMidnightLocal(new Date());
+    const nowMs = Date.now();
     const dueIso = this.coerceIsoDate(card.dueDate, card.createdAt);
-    const due = this.getMidnightLocal(dueIso) || (now ? new Date(now) : new Date());
-    
-    const isDue = now ? (due.getTime() <= now.getTime()) : true;
-    const overdue = now ? (due.getTime() < now.getTime()) : false;
-    
+    const parsedDue = new Date(dueIso);
+    const dueMs = Number.isNaN(parsedDue.getTime()) ? nowMs : parsedDue.getTime();
+    const isDue = dueMs <= nowMs;
+    const overdue = isDue && dueMs < nowMs && (card.repetitions || 0) > 0;
     return {
       state: isDue ? (overdue ? 'overdue' : 'due') : (((card.repetitions || 0) === 0) ? 'new' : 'scheduled'),
       dueDate: dueIso,
@@ -3889,18 +3888,10 @@ Be thorough and comprehensive.`;
 
       const createdAt = new Date().toISOString();
       const newCard = {
-        id: cardId,
-        word: normalizedWord,
-        scopeType: targetScope.type,
-        scopeId: targetScope.id || 'all',
-        scopeKey,
-        createdAt,
-        dueDate: createdAt,
-        repetitions: 0,
-        interval: 0,
-        easeFactor: 2.5,
-        lastReviewed: null,
-        status: 'new'
+        id: cardId, word: normalizedWord, scopeType: targetScope.type,
+        scopeId: targetScope.id || 'all', scopeKey, createdAt, dueDate: createdAt,
+        repetitions: 0, interval: 0, easeFactor: 2.5, lastReviewed: null,
+        fsrsVersion: 6, stability: null, difficulty: null, lapses: 0, status: 'new'
       };
 
       await this.db.set(this.LEITNER_STORE, newCard);
@@ -3941,23 +3932,26 @@ Be thorough and comprehensive.`;
         }
         
         const dueIso = this.coerceIsoDate(card.dueDate, card.createdAt);
-        const dueDate = this.getMidnightLocal(dueIso);
-        if (!dueDate) return false;
-        return dueDate.getTime() <= today.getTime();
+        const dueDate = new Date(dueIso);
+        if (Number.isNaN(dueDate.getTime())) return false;
+        return dueDate.getTime() <= Date.now();
       });
       
       // Sort cards by priority: overdue (oldest first) -> new -> regular due
       cardsToReview.sort((a, b) => {
         const aDueIso = this.coerceIsoDate(a.dueDate, a.createdAt);
         const bDueIso = this.coerceIsoDate(b.dueDate, b.createdAt);
-        const aDue = this.getMidnightLocal(aDueIso) || today;
-        const bDue = this.getMidnightLocal(bDueIso) || today;
+        const aParsedDue = new Date(aDueIso);
+        const bParsedDue = new Date(bDueIso);
+        const aDue = Number.isNaN(aParsedDue.getTime()) ? today : aParsedDue;
+        const bDue = Number.isNaN(bParsedDue.getTime()) ? today : bParsedDue;
         
         const aIsNew = (a.repetitions || 0) === 0;
         const bIsNew = (b.repetitions || 0) === 0;
 
-        const aIsOverdue = !aIsNew && aDue.getTime() < today.getTime();
-        const bIsOverdue = !bIsNew && bDue.getTime() < today.getTime();
+        const nowForSort = Date.now();
+        const aIsOverdue = !aIsNew && aDue.getTime() < nowForSort;
+        const bIsOverdue = !bIsNew && bDue.getTime() < nowForSort;
 
         // Overdue review cards first
         if (aIsOverdue && !bIsOverdue) return -1;
@@ -4061,205 +4055,191 @@ Be thorough and comprehensive.`;
     this.leitnerInitialControls.classList.add('hidden');
     this.leitnerRatingControls.classList.remove('hidden');
     this.updateRatingButtons();
+    const cardBeingRevealed = this.currentCard;
+    this.cardBackText.replaceChildren();
+    const loadingMeaning = document.createElement('div');
+    loadingMeaning.className = 'card-meaning-item card-meaning-loading';
+    loadingMeaning.textContent = 'Loading meanings…';
+    this.cardBackText.appendChild(loadingMeaning);
     try {
-        const meaningData = await this.getWordMeaning(this.currentCard.word);
-        if (meaningData && meaningData.meanings && meaningData.meanings.length > 0) {
-            this.cardBackText.innerHTML = meaningData.meanings
-                .map(m => `<div class="card-meaning-item"><span class="card-meaning-text">${m.text}</span><span class="card-meaning-type">${m.type}</span></div>`)
-                .join('');
-        } else {
-            this.cardBackText.innerHTML = '<div class="card-meaning-item">Meaning not found.</div>';
-        }
+      const meaningData = await this.getWordMeaning(cardBeingRevealed.word);
+      if (this.currentCard !== cardBeingRevealed || !this.leitnerCard.classList.contains('is-flipped')) return;
+      const meanings = Array.isArray(meaningData?.meanings) ? meaningData.meanings : [];
+      const validMeanings = meanings.filter(m => m && String(m.type || '').toLowerCase() !== 'error');
+      this.cardBackText.replaceChildren();
+      if (validMeanings.length) {
+        validMeanings.forEach(meaning => {
+          const item = document.createElement('div');
+          item.className = 'card-meaning-item';
+          item.dir = 'rtl';
+          const type = String(meaning?.type ?? '').trim();
+          if (type) {
+            const typeEl = document.createElement('span');
+            typeEl.className = 'card-meaning-type';
+            typeEl.textContent = type;
+            item.appendChild(typeEl);
+          }
+          const textEl = document.createElement('span');
+          textEl.className = 'card-meaning-text';
+          textEl.textContent = String(meaning?.text ?? '');
+          item.appendChild(textEl);
+          this.cardBackText.appendChild(item);
+        });
+      } else {
+        const fallback = document.createElement('div');
+        fallback.className = 'card-meaning-item card-meaning-empty';
+        fallback.textContent = meanings[0]?.text || 'Meaning not found.';
+        this.cardBackText.appendChild(fallback);
+      }
     } catch (error) {
-        console.error("Error fetching meaning for card:", error);
-        this.cardBackText.innerHTML = '<div class="card-meaning-item">Error loading meaning.</div>';
+      console.error('Error fetching meaning for card:', error);
+      if (this.currentCard !== cardBeingRevealed) return;
+      this.cardBackText.replaceChildren();
+      const errorItem = document.createElement('div');
+      errorItem.className = 'card-meaning-item card-meaning-error';
+      errorItem.textContent = error?.message || 'Error loading meaning.';
+      this.cardBackText.appendChild(errorItem);
     }
   }
   
-  // SM-2 Algorithm Implementation (Standard Spaced Repetition)
-  calculateSM2(card, quality) {
-    /*
-     * Anki SM-2 Algorithm with Learning Steps
-     * quality: 0-5 where:
-     *   0: Again (Complete blackout)
-     *   2: Hard (Correct with hesitation)  
-     *   3: Good (Correct response)
-     *   5: Easy (Perfect recall)
-     */
-    
-    let { repetitions, interval, easeFactor } = card;
-    
-    // Ensure defaults
-    repetitions = repetitions || 0;
-    interval = interval || 0;
-    easeFactor = easeFactor || 2.5;
-    
-    let newRepetitions;
-    let newInterval;
-    let newEaseFactor;
-    
-    // Again button (quality=0) - Failed card
-    if (quality === 0) {
-      // Failed card - reset to learning
-      newRepetitions = 0;
-      // Again button shows card in same session for new cards, tomorrow for review cards
-      if (repetitions === 0) {
-        newInterval = 0; // Show again soon in same session
-      } else {
-        newInterval = 1; // Review tomorrow for lapsed cards
-      }
-      newEaseFactor = Math.max(1.3, easeFactor - 0.2); // Decrease ease factor
+  // FSRS-6 default parameters from Open Spaced Repetition.
+  // The 90% retention target and exact fractional interval are shared by
+  // the preview labels and the actual saved due timestamp.
+  getFSRSParameters() {
+    return [0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001, 1.8722, 0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425, 0.0912, 0.0658, 0.1542];
+  }
+  clampFSRS(value, min, max) { return Math.min(max, Math.max(min, value)); }
+  getFSRSDifficultyFromLegacyCard(card) {
+    if (Number.isFinite(card?.difficulty)) return this.clampFSRS(card.difficulty, 1, 10);
+    const ease = Number.isFinite(card?.easeFactor) ? card.easeFactor : 2.5;
+    return this.clampFSRS(5.5 + (2.5 - ease) * (4.5 / 1.2), 1, 10);
+  }
+  calculateFSRS(card, grade, now = new Date()) {
+    const w = this.getFSRSParameters();
+    const retention = 0.9;
+    const msPerDay = 86400000;
+    const nowDate = now instanceof Date ? now : new Date(now);
+    const nowMs = Number.isNaN(nowDate.getTime()) ? Date.now() : nowDate.getTime();
+    const rawStability = Number(card?.stability);
+    const hasStability = Number.isFinite(rawStability) && rawStability > 0;
+    const repetitions = Number.isFinite(card?.repetitions) ? Math.max(0, card.repetitions) : 0;
+    let stability, difficulty, elapsedDays = 0, retrievability = 1;
+    if (!hasStability && repetitions === 0) {
+      stability = Math.max(0.1, w[grade - 1]);
+      difficulty = this.clampFSRS(w[4] - Math.exp(w[5] * (grade - 1)) + 1, 1, 10);
     } else {
-      // Passed card (Hard, Good, or Easy)
-      // Calculate new ease factor: EF' = EF + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
-      newEaseFactor = Math.max(1.3, easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)));
-      
-      if (repetitions === 0) {
-        // First successful review (Learning -> Graduated)
-        if (quality === 5) {
-          // Easy button on new card - graduate immediately with longer interval
-          newInterval = 4; // Anki default: 4 days for easy on new cards
-          newRepetitions = 2; // Skip learning phase entirely
-        } else if (quality === 2) {
-          // Hard button on new card - graduate but with shorter interval
-          newInterval = 1;
-          newRepetitions = 1; // Graduate to review stage
-        } else {
-          // Good button on new card - graduate to review
-          newInterval = 1; // Graduate with 1 day interval
-          newRepetitions = 1;
-        }
-      } else if (repetitions === 1) {
-        // Second successful review (first review after graduating)
-        if (quality === 5) {
-          // Easy button - bonus multiplier
-          newInterval = Math.round(interval * newEaseFactor * 1.3);
-        } else if (quality === 2) {
-          // Hard button - slightly longer than current
-          newInterval = Math.max(2, Math.round(interval * 1.2)); // At least 2 days
-        } else {
-          // Good button
-          newInterval = 6; // Anki default graduating interval (2nd review)
-        }
-        newRepetitions = 2;
+      stability = hasStability ? rawStability : Math.max(0.1, Number.isFinite(card?.interval) && card.interval > 0 ? card.interval : 1);
+      difficulty = this.getFSRSDifficultyFromLegacyCard(card);
+      let lastReviewedMs = NaN;
+      if (card?.lastReviewed) lastReviewedMs = new Date(card.lastReviewed).getTime();
+      if (!Number.isFinite(lastReviewedMs)) {
+        const oldDueMs = new Date(this.coerceIsoDate(card?.dueDate, card?.createdAt)).getTime();
+        const oldInterval = Number.isFinite(card?.interval) && card.interval > 0 ? card.interval : 1;
+        lastReviewedMs = Number.isFinite(oldDueMs) ? oldDueMs - oldInterval * msPerDay : NaN;
+      }
+      if (!Number.isFinite(lastReviewedMs)) {
+        const createdMs = new Date(card?.createdAt).getTime();
+        lastReviewedMs = Number.isFinite(createdMs) ? createdMs : nowMs - msPerDay;
+      }
+      elapsedDays = Math.max(0, (nowMs - lastReviewedMs) / msPerDay);
+      const factor = Math.pow(0.9, -1 / w[20]) - 1;
+      retrievability = Math.pow(1 + factor * elapsedDays / Math.max(stability, 0.1), -w[20]);
+      const previousStability = stability;
+      const previousDifficulty = difficulty;
+      const deltaDifficulty = -w[6] * (grade - 3);
+      const dampedDifficulty = difficulty + deltaDifficulty * ((10 - difficulty) / 9);
+      const easyDifficulty = w[4] - Math.exp(w[5] * 3) + 1;
+      difficulty = this.clampFSRS(w[7] * easyDifficulty + (1 - w[7]) * dampedDifficulty, 1, 10);
+      if (elapsedDays < 1) {
+        stability = stability * Math.exp(w[17] * (grade - 3 + w[18])) * Math.pow(stability, -w[19]);
+        if (grade >= 3) stability = Math.max(stability, previousStability);
+      } else if (grade === 1) {
+        const forgotten = w[11] * Math.pow(previousDifficulty, -w[12]) *
+          (Math.pow(stability + 1, w[13]) - 1) * Math.exp(w[14] * (1 - retrievability));
+        stability = Math.min(stability, Math.max(0.01, forgotten));
       } else {
-        // Mature card (repetitions >= 2)
-        if (quality === 5) {
-          // Easy button - bonus multiplier
-          newInterval = Math.round(interval * newEaseFactor * 1.3);
-        } else if (quality === 2) {
-          // Hard button - multiply by 1.2
-          newInterval = Math.max(Math.round(interval * 1.2), interval + 1);
-        } else {
-          // Good button - normal interval
-          newInterval = Math.round(interval * newEaseFactor);
-        }
-        newRepetitions = repetitions + 1;
+        const multiplier = grade === 2 ? w[15] : grade === 4 ? w[16] : 1;
+        const increase = Math.exp(w[8]) * (11 - previousDifficulty) * Math.pow(stability, -w[9]) *
+          (Math.exp(w[10] * (1 - retrievability)) - 1) * multiplier;
+        stability = Math.max(stability, stability * (increase + 1));
       }
     }
-    
-    // Ensure interval is never 0 except for same-session reviews (Again button)
-    if (newInterval === 0 && quality > 0) {
-      newInterval = 1;
-    }
-    
-    return {
-      repetitions: newRepetitions,
-      interval: newInterval,
-      easeFactor: newEaseFactor
-    };
+    stability = this.clampFSRS(Number.isFinite(stability) ? stability : 0.1, 0.01, 36500);
+    difficulty = this.clampFSRS(Number.isFinite(difficulty) ? difficulty : 5, 1, 10);
+    const factor = Math.pow(0.9, -1 / w[20]) - 1;
+    const interval = this.clampFSRS(stability * (Math.pow(retention, -1 / w[20]) - 1) / factor, 0.01, 36500);
+    return { stability, difficulty, interval, retrievability, elapsedDays, fsrsVersion: 6 };
   }
-  
   formatInterval(days) {
-    if (!days || days < 1) return `<1d`;
-    if (days === 1) return `1 day`;
-    if (days < 30) return `${days} days`;
-    const months = Math.round(days / 30);
-    if (months === 1) return `1 month`;
-    if (months < 12) return `${months} months`;
+    const interval = Number(days);
+    if (!Number.isFinite(interval) || interval <= 0) return '<1 min';
+    if (interval < 1 / 24) return Math.max(1, Math.round(interval * 1440)) + ' min';
+    if (interval < 1) return Math.max(1, Math.round(interval * 24)) + ' h';
+    if (interval < 30) {
+      const rounded = Math.round(interval * 10) / 10;
+      const value = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+      return value + ' ' + (rounded === 1 ? 'day' : 'days');
+    }
+    const months = Math.round(interval / 30);
+    if (months < 12) return months + ' ' + (months === 1 ? 'month' : 'months');
     const years = Math.round(months / 12);
-    return years === 1 ? `1 year` : `${years} years`;
+    return years + ' ' + (years === 1 ? 'year' : 'years');
   }
-  
   updateRatingButtons() {
     if (!this.currentCard) return;
-    
     const card = this.currentCard;
-    
-    // Calculate what would happen with each rating
-    const againResult = this.calculateSM2(card, 0);
-    const hardResult = this.calculateSM2(card, 2);
-    const goodResult = this.calculateSM2(card, 3);
-    const easyResult = this.calculateSM2(card, 5);
-    
-    // Update button labels with intervals and keyboard shortcuts
-    this.ratingAgainBtn.innerHTML = `Again<br><small>${this.formatInterval(againResult.interval)} (1)</small>`;
-    this.ratingHardBtn.innerHTML = `Hard<br><small>${this.formatInterval(hardResult.interval)} (2)</small>`;
-    this.ratingGoodBtn.innerHTML = `Good<br><small>${this.formatInterval(goodResult.interval)} (3)</small>`;
-    this.ratingEasyBtn.innerHTML = `Easy<br><small>${this.formatInterval(easyResult.interval)} (4)</small>`;
+    const now = new Date();
+    const outcomes = [
+      { rating: 1, button: this.ratingAgainBtn, label: 'Again', shortcut: '1' },
+      { rating: 2, button: this.ratingHardBtn, label: 'Hard', shortcut: '2' },
+      { rating: 3, button: this.ratingGoodBtn, label: 'Good', shortcut: '3' },
+      { rating: 4, button: this.ratingEasyBtn, label: 'Easy', shortcut: '4' }
+    ];
+    outcomes.forEach(({ rating, button, label, shortcut }) => {
+      if (!button) return;
+      const result = this.calculateFSRS(card, rating, now);
+      const intervalLabel = this.formatInterval(result.interval);
+      button.replaceChildren();
+      const title = document.createElement('span');
+      title.className = 'rating-label'; title.textContent = label;
+      const schedule = document.createElement('span');
+      schedule.className = 'rating-interval'; schedule.textContent = 'in ' + intervalLabel;
+      const key = document.createElement('kbd');
+      key.className = 'rating-shortcut'; key.textContent = shortcut;
+      button.append(title, schedule, key);
+      button.title = label + ': next review in ' + intervalLabel;
+      button.setAttribute('aria-label', label + ', next review in ' + intervalLabel + ', shortcut ' + shortcut);
+      button.dataset.intervalDays = String(result.interval);
+      button.dataset.fsrsGrade = String(rating);
+    });
   }
-
   async rateCard(rating) {
-    if (!this.currentCard) return;
-    
-    // Map our 4 buttons to SM-2 quality scores (0-5)
-    const qualityMap = {
-      1: 0, // Again = Complete failure
-      2: 2, // Hard = Incorrect but remembered
-      3: 3, // Good = Correct with difficulty
-      4: 5  // Easy = Perfect recall
-    };
-    
-    const quality = qualityMap[rating];
-    const sm2Result = this.calculateSM2(this.currentCard, quality);
-    
-    // Calculate next due date
-    const nextDueDate = new Date();
-    nextDueDate.setHours(0, 0, 0, 0); // Set to midnight today
-    
-    // Add interval days - if interval is 0, keep it today for same-session review
-    if (sm2Result.interval > 0) {
-      nextDueDate.setDate(nextDueDate.getDate() + sm2Result.interval);
-    }
-    
-    // Determine status
-    let status;
-    if (sm2Result.repetitions === 0) {
-      status = 'learning'; // New cards or lapsed cards
-    } else {
-      status = 'review'; // Graduated cards (rep >= 1)
-    }
-    
-    // Update card in database
+    if (!this.currentCard || ![1, 2, 3, 4].includes(rating)) return;
+    const reviewedAt = new Date();
+    const result = this.calculateFSRS(this.currentCard, rating, reviewedAt);
+    const previousReviews = Number.isFinite(this.currentCard.repetitions) ? this.currentCard.repetitions : 0;
+    const priorStability = Number.isFinite(this.currentCard.stability) && this.currentCard.stability > 0;
+    const previousLapses = Number.isFinite(this.currentCard.lapses) ? this.currentCard.lapses : 0;
+    const nextDueDate = new Date(reviewedAt.getTime() + result.interval * 86400000);
     const updatedCard = {
       ...this.currentCard,
-      repetitions: sm2Result.repetitions,
-      interval: sm2Result.interval,
-      easeFactor: sm2Result.easeFactor,
+      repetitions: previousReviews + 1,
+      interval: result.interval,
+      easeFactor: this.currentCard.easeFactor || 2.5,
       dueDate: nextDueDate.toISOString(),
-      lastReviewed: new Date().toISOString(),
-      status: status
+      lastReviewed: reviewedAt.toISOString(),
+      fsrsVersion: 6,
+      stability: result.stability,
+      difficulty: result.difficulty,
+      lapses: previousLapses + (rating === 1 && priorStability ? 1 : 0),
+      status: result.interval < 1 ? 'learning' : 'review'
     };
-    
     await this.db.set(this.LEITNER_STORE, updatedCard);
-    
-    // Update cache for this word
     await this.refreshLeitnerDueCacheForWord(this.currentCard.word, this.currentLeitnerScope);
-    
-    // If interval is 0 (Again button), re-add card to queue for same-session review
-    if (sm2Result.interval === 0) {
-      // Add to end of queue after 3-5 random cards (if available)
-      const insertPosition = Math.min(
-        this.leitnerQueue.length,
-        Math.floor(Math.random() * 3) + 3
-      );
-      this.leitnerQueue.splice(insertPosition, 0, updatedCard);
-    }
-    
     this.showNextCard();
   }
-  
-  // --- Import/Export ---
+
+    // --- Import/Export ---
   showImportTextModal() { this.importTextModal.classList.remove("hidden"); }
   hideImportTextModal() { this.importTextModal.classList.add("hidden"); }
 
