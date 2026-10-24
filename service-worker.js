@@ -1,6 +1,6 @@
-const CACHE_NAME = 'wordlens-app-v20-chat-prompt-cleanup';
+const CACHE_NAME = 'wordlens-app-v21-realtime-abort-qwen35';
 const APP_BASE = self.registration.scope;
-const APP_VERSION = '20261024-chat-prompt-cleanup-v20';
+const APP_VERSION = '20261024-realtime-abort-qwen35-v21';
 
 // The app shell, local data, and flashcards work offline after one successful
 // online visit. API endpoints are intentionally never cached.
