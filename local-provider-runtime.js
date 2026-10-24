@@ -840,7 +840,9 @@
       // Avoid repeating that same final user message in the prompt.
       const last = history[history.length - 1];
       if (last?.role === 'user' && String(last.content ?? '') === String(message ?? '')) history.pop();
-      return localCompletion(history.concat([{ role: 'user', content: message }]), {}, requestOptions);
+      const customInstructions = typeof this.getCustomInstructions === 'function' ? this.getCustomInstructions() : '';
+      const messages = [...(customInstructions ? [{ role: 'system', content: customInstructions }] : []), ...history, { role: 'user', content: message }];
+      return localCompletion(messages, {}, requestOptions);
     };
 
     AIChatApp.prototype.translateTextOpenRouter = async function(text) {
@@ -853,7 +855,7 @@
       }
     };
 
-    AIChatApp.prototype.getWordMeaningOpenRouter = async function(word) {
+    AIChatApp.prototype.getWordMeaningOpenRouter = async function(word, options = {}) {
       const lowerWord = String(word ?? '').toLowerCase().trim();
       if (!lowerWord) {
         return { meanings: [{ text: 'No word selected.', type: 'Error' }], synonyms: [], antonyms: [] };
@@ -943,15 +945,17 @@
       try {
         // Normalize and cap previously cached values too, so old oversized
         // dictionaries cannot bypass the new limits.
-        try {
-          const cached = await this.db.get('word_meanings', lowerWord);
-          const cachedResult = normalizeMeaningResult(cached?.value);
-          if (cachedResult) {
-            await this.db.set('word_meanings', { word: lowerWord, value: cachedResult }).catch(() => {});
-            return cachedResult;
+        if (!options.forceRefresh) {
+          try {
+            const cached = await this.db.get('word_meanings', lowerWord);
+            const cachedResult = normalizeMeaningResult(cached?.value);
+            if (cachedResult) {
+              await this.db.set('word_meanings', { word: lowerWord, value: cachedResult }).catch(() => {});
+              return cachedResult;
+            }
+          } catch (error) {
+            console.debug('Local dictionary cache read failed:', error);
           }
-        } catch (error) {
-          console.debug('Local dictionary cache read failed:', error);
         }
 
         const wordJson = JSON.stringify(String(word));
