@@ -420,6 +420,7 @@
     };
 
     let nativeError = '';
+    let nativeFatal = false;
     // Local whisper.cpp serves /inference natively; hit it first to avoid waiting
     // on a non-existent OpenAI route. Other compatible servers fall back below.
     if (!isAvalai) {
@@ -433,11 +434,16 @@
           catch (error) { nativeError = error.message; }
         } else {
           nativeError = 'whisper.cpp /inference returned HTTP ' + native.response.status + ': ' + native.bodyText.slice(0, 700);
+          nativeFatal = [401, 403, 502, 503, 504].includes(native.response.status);
         }
       } catch (error) {
         nativeError = error.message || String(error);
         // Do not start a second long inference if the first endpoint timed out.
         if (/timed out after 60 seconds/i.test(nativeError)) throw error;
+      }
+      if (nativeFatal) {
+        throw new Error('The local STT service could not process /inference. ' + nativeError +
+          ' Check the STT Base URL, server logs and firewall before retrying.');
       }
     }
 
