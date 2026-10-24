@@ -2465,44 +2465,119 @@ class AIChatApp {
   updateProgress(progressBar, percentage) { if (progressBar) progressBar.style.width = `${percentage}%`; }
   
   // Download word audio as MP3
-  formatMessageContent(content, messageId) {
-  if (content.startsWith('Error:')) return `<p>${content}</p>`;
-    
-    let html;
-    if (typeof marked === 'function') {
-      // Configure marked for better formatting
-      marked.setOptions({
-        gfm: true,
-        breaks: true,
-        sanitize: false,
-        smartLists: true,
-        smartypants: true
-      });
-      html = marked.parse(content);
-    } else {
-      console.warn("Marked.js not loaded. Using basic formatting.");
-      html = content
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-        .replace(/\n/g, '<br>');
-    }
-    
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(`<div>${html}</div>`, 'text/html');
-    
-    // Apply Persian font to Persian text
-    this.applyPersianFont(doc.body.firstChild);
-    
-    // Make English words clickable
-    this.processNodeForClickable(doc.body.firstChild, messageId);
-    
-    return doc.body.firstChild.innerHTML;
+  normalizeMarkdownSource(content) {
+    const lines = String(content ?? "").replace(/\r\n?/g, "\n").split("\n");
+    let activeFence = null;
+    let activeFenceLength = 0;
+
+    return lines.map(line => {
+      const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+      if (fenceMatch) {
+        const fence = fenceMatch[1];
+        if (!activeFence) {
+          activeFence = fence[0];
+          activeFenceLength = fence.length;
+        } else if (fence[0] === activeFence && fence.length >= activeFenceLength) {
+          activeFence = null;
+          activeFenceLength = 0;
+        }
+        return line;
+      }
+
+      // Preserve fenced code exactly; normalize only ordinary Markdown text.
+      if (activeFence) return line;
+
+      let normalized = line.replace(/&#x20;/gi, " ");
+      // Be forgiving with common model output like "#Title" or "\\###Title".
+      normalized = normalized.replace(/^([ \t]{0,3})\\?(#{1,6})(?=\S)/, "$1$2 ");
+      return normalized;
+    }).join("\n");
   }
-  
-  applyPersianFont(node) {
+
+  sanitizeRenderedMessageHTML(root) {
+    if (!root || typeof root.querySelectorAll !== "function") return;
+
+    root.querySelectorAll("script, style, iframe, object, embed, form, meta, link, base").forEach(element => {
+      element.remove();
+    });
+
+    root.querySelectorAll("*").forEach(element => {
+      Array.from(element.attributes).forEach(attribute => {
+        const name = attribute.name.toLowerCase();
+        const value = String(attribute.value || "").trim();
+        if (name.startsWith("on") || name === "srcdoc" || name === "style") {
+          element.removeAttribute(attribute.name);
+          return;
+        }
+        if (
+          ["href", "src", "xlink:href", "formaction"].includes(name) &&
+          /^(javascript:|vbscript:|data:text\/html)/i.test(value)
+        ) {
+          element.removeAttribute(attribute.name);
+        }
+      });
+    });
+  }
+
+  formatMessageContent(content, messageId) {
+    const escapeHTML = value => String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+
+    if (String(content ?? "").startsWith("Error:")) {
+      return `<p>${escapeHTML(content)}</p>`;
+    }
+
+    const markdownSource = this.normalizeMarkdownSource(content);
+    let html;
+    const markdownAvailable =
+      typeof marked !== "undefined" &&
+      marked &&
+      typeof marked.parse === "function";
+
+    if (markdownAvailable) {
+      if (typeof marked.setOptions === "function") {
+        marked.setOptions({
+          gfm: true,
+          breaks: true,
+          smartLists: true,
+          smartypants: true
+        });
+      }
+      html = marked.parse(markdownSource);
+    } else if (typeof marked === "function") {
+      // Compatibility with older builds that expose marked as a callable function.
+      html = marked(markdownSource);
+    } else {
+      console.warn("Marked.js is unavailable. Using basic formatting fallback.");
+      html = escapeHTML(markdownSource)
+        .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+        .replace(/\*(.*?)\*/g, "<em>$1</em>")
+        .replace(/^ {0,3}(#{1,6}) (.+)$/gm, (_match, marks, heading) =>
+          `<h${marks.length}>${heading}</h${marks.length}>`
+        )
+        .replace(/^\s*[-*+]\s+(.+)$/gm, "<li>$1</li>")
+        .replace(/\n/g, "<br>");
+    }
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(`<div>${html}</div>`, "text/html");
+    const contentRoot = doc.body.firstElementChild;
+
+    // Model output and imported documents are not trusted HTML.
+    this.sanitizeRenderedMessageHTML(contentRoot);
+
+    // Preserve the existing Persian font behavior and clickable-word feature.
+    this.applyPersianFont(contentRoot);
+    this.processNodeForClickable(contentRoot, messageId);
+
+    return contentRoot.innerHTML;
+  }
+
+    applyPersianFont(node) {
     const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, null, false);
     const textNodes = [];
     let textNode;
