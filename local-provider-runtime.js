@@ -1307,7 +1307,7 @@
         const wordJson = JSON.stringify(String(word));
         const prompt = [
           'English-to-Persian dictionary. Target: ' + wordJson + '.',
-          'Return JSON only: meanings=[{text: Persian-script gloss, type: Persian part of speech}], synonyms=[English terms], antonyms=[English terms].',
+          'Return JSON only with exactly the keys meanings, synonyms, antonyms. Meanings are objects with text (actual Persian translation in Persian script) and type (short Persian part of speech). Synonyms and antonyms are English word arrays.',
           'Give 1-4 common, distinct Persian senses; keep glosses concise. Give 2-3 useful English synonyms and 1-2 common English opposites when meaningful. Use [] only if a requested list has no reasonable answer. No duplicates or explanations.',
           ...(requirePersian ? ['Every meanings[].text must be a Persian translation in Persian script; English definitions are invalid.'] : []),
           ...(requireRelatedTerms ? ['Prioritize useful synonyms and meaningful antonyms; keep those lists in English.'] : []),
