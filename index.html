@@ -115,6 +115,18 @@
           <small style="color: #666; display: block; margin-top: 5px;">Optional. If your ElevenLabs key lacks <b>voices_read</b>, paste Brian’s voice_id here so the app can call TTS without listing voices.</small>
         </div>
         
+        <div class="setting-section custom-instructions-section">
+          <label for="custom-instructions-input">Custom Instructions</label>
+          <textarea
+            id="custom-instructions-input"
+            class="settings-textarea"
+            rows="5"
+            maxlength="12000"
+            placeholder="Tell the assistant how you want it to respond: preferred language, tone, detail level, formatting, role, or other persistent preferences."
+            aria-describedby="custom-instructions-help"></textarea>
+          <small id="custom-instructions-help" class="settings-help">These instructions apply to chat replies and are saved locally in this browser. Dictionary and translation formatting stay unchanged. Leave empty to use WordLens defaults.</small>
+        </div>
+
         <div class="setting-section">
             <p>Theme:</p>
             <select id="theme-select" class="settings-select">
@@ -174,6 +186,14 @@
         <div class="popup-header-actions">
             <button id="play-word-audio-btn" class="btn-icon" title="Play Word">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon></svg>
+            </button>
+            <button id="retry-word-meaning-btn" class="btn-icon" type="button" title="Refresh meaning" aria-label="Refresh meaning">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M20 7v5h-5"></path>
+                  <path d="M4 17v-5h5"></path>
+                  <path d="M5.6 9a7 7 0 0 1 11.8-2L20 12"></path>
+                  <path d="M4 12l2.6 5a7 7 0 0 0 11.8-2"></path>
+                </svg>
             </button>
             <button id="review-word-btn" class="btn-icon hidden" title="Review This Card">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>

@@ -313,6 +313,7 @@ class AIChatApp {
     this.theme = localStorage.getItem("theme") || "light";
     this.fontSize = parseInt(localStorage.getItem("font_size")) || 14;
     this.boldText = localStorage.getItem("bold_text") === "true";
+    this.customInstructions = localStorage.getItem("custom_instructions") || "";
     this.chats = JSON.parse(localStorage.getItem("chats")) || [];
     try {
       this.documents = JSON.parse(localStorage.getItem("documents")) || [];
@@ -439,6 +440,7 @@ class AIChatApp {
     this.themeSelect = document.getElementById("theme-select");
     this.fontSizeSelect = document.getElementById("font-size-select");
     this.boldTextCheckbox = document.getElementById("bold-text-checkbox");
+    this.customInstructionsInput = document.getElementById("custom-instructions-input");
     this.saveSettingsBtn = document.getElementById("save-settings");
     this.cancelSettingsBtn = document.getElementById("cancel-settings");
     this.app = document.getElementById("app");
@@ -780,6 +782,7 @@ class AIChatApp {
     this.fontSizeSelect.value = this.fontSize;
     document.getElementById("font-size-value").textContent = this.fontSize;
     this.boldTextCheckbox.checked = this.boldText;
+    if (this.customInstructionsInput) this.customInstructionsInput.value = this.customInstructions || "";
     this.settingsModal.classList.remove("hidden");
   }
 
@@ -797,6 +800,7 @@ class AIChatApp {
     const theme = this.themeSelect.value;
     const fontSize = this.fontSizeSelect.value;
     const boldText = this.boldTextCheckbox.checked;
+    const customInstructions = (this.customInstructionsInput?.value || "").trim();
     
     localStorage.setItem("gemini_api_key", geminiKey);
     this.API_KEY = geminiKey;
@@ -821,6 +825,8 @@ class AIChatApp {
     localStorage.setItem("bold_text", boldText);
     this.boldText = boldText;
     this.applyBoldText(boldText);
+    localStorage.setItem("custom_instructions", customInstructions);
+    this.customInstructions = customInstructions;
     this.hideSettingsModal();
     this.showToast("Settings saved successfully!", "success");
   }
@@ -2459,44 +2465,119 @@ class AIChatApp {
   updateProgress(progressBar, percentage) { if (progressBar) progressBar.style.width = `${percentage}%`; }
   
   // Download word audio as MP3
-  formatMessageContent(content, messageId) {
-  if (content.startsWith('Error:')) return `<p>${content}</p>`;
-    
-    let html;
-    if (typeof marked === 'function') {
-      // Configure marked for better formatting
-      marked.setOptions({
-        gfm: true,
-        breaks: true,
-        sanitize: false,
-        smartLists: true,
-        smartypants: true
-      });
-      html = marked.parse(content);
-    } else {
-      console.warn("Marked.js not loaded. Using basic formatting.");
-      html = content
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-        .replace(/\n/g, '<br>');
-    }
-    
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(`<div>${html}</div>`, 'text/html');
-    
-    // Apply Persian font to Persian text
-    this.applyPersianFont(doc.body.firstChild);
-    
-    // Make English words clickable
-    this.processNodeForClickable(doc.body.firstChild, messageId);
-    
-    return doc.body.firstChild.innerHTML;
+  normalizeMarkdownSource(content) {
+    const lines = String(content ?? "").replace(/\r\n?/g, "\n").split("\n");
+    let activeFence = null;
+    let activeFenceLength = 0;
+
+    return lines.map(line => {
+      const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+      if (fenceMatch) {
+        const fence = fenceMatch[1];
+        if (!activeFence) {
+          activeFence = fence[0];
+          activeFenceLength = fence.length;
+        } else if (fence[0] === activeFence && fence.length >= activeFenceLength) {
+          activeFence = null;
+          activeFenceLength = 0;
+        }
+        return line;
+      }
+
+      // Preserve fenced code exactly; normalize only ordinary Markdown text.
+      if (activeFence) return line;
+
+      let normalized = line.replace(/&#x20;/gi, " ");
+      // Be forgiving with common model output like "#Title" or "\\###Title".
+      normalized = normalized.replace(/^([ \t]{0,3})\\?(#{1,6})(?=\S)/, "$1$2 ");
+      return normalized;
+    }).join("\n");
   }
-  
-  applyPersianFont(node) {
+
+  sanitizeRenderedMessageHTML(root) {
+    if (!root || typeof root.querySelectorAll !== "function") return;
+
+    root.querySelectorAll("script, style, iframe, object, embed, form, meta, link, base").forEach(element => {
+      element.remove();
+    });
+
+    root.querySelectorAll("*").forEach(element => {
+      Array.from(element.attributes).forEach(attribute => {
+        const name = attribute.name.toLowerCase();
+        const value = String(attribute.value || "").trim();
+        if (name.startsWith("on") || name === "srcdoc" || name === "style") {
+          element.removeAttribute(attribute.name);
+          return;
+        }
+        if (
+          ["href", "src", "xlink:href", "formaction"].includes(name) &&
+          /^(javascript:|vbscript:|data:text\/html)/i.test(value)
+        ) {
+          element.removeAttribute(attribute.name);
+        }
+      });
+    });
+  }
+
+  formatMessageContent(content, messageId) {
+    const escapeHTML = value => String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+
+    if (String(content ?? "").startsWith("Error:")) {
+      return `<p>${escapeHTML(content)}</p>`;
+    }
+
+    const markdownSource = this.normalizeMarkdownSource(content);
+    let html;
+    const markdownAvailable =
+      typeof marked !== "undefined" &&
+      marked &&
+      typeof marked.parse === "function";
+
+    if (markdownAvailable) {
+      if (typeof marked.setOptions === "function") {
+        marked.setOptions({
+          gfm: true,
+          breaks: true,
+          smartLists: true,
+          smartypants: true
+        });
+      }
+      html = marked.parse(markdownSource);
+    } else if (typeof marked === "function") {
+      // Compatibility with older builds that expose marked as a callable function.
+      html = marked(markdownSource);
+    } else {
+      console.warn("Marked.js is unavailable. Using basic formatting fallback.");
+      html = escapeHTML(markdownSource)
+        .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+        .replace(/\*(.*?)\*/g, "<em>$1</em>")
+        .replace(/^ {0,3}(#{1,6}) (.+)$/gm, (_match, marks, heading) =>
+          `<h${marks.length}>${heading}</h${marks.length}>`
+        )
+        .replace(/^\s*[-*+]\s+(.+)$/gm, "<li>$1</li>")
+        .replace(/\n/g, "<br>");
+    }
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(`<div>${html}</div>`, "text/html");
+    const contentRoot = doc.body.firstElementChild;
+
+    // Model output and imported documents are not trusted HTML.
+    this.sanitizeRenderedMessageHTML(contentRoot);
+
+    // Preserve the existing Persian font behavior and clickable-word feature.
+    this.applyPersianFont(contentRoot);
+    this.processNodeForClickable(contentRoot, messageId);
+
+    return contentRoot.innerHTML;
+  }
+
+    applyPersianFont(node) {
     const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, null, false);
     const textNodes = [];
     let textNode;
@@ -2507,6 +2588,9 @@ class AIChatApp {
     
     textNodes.forEach(textNode => {
       const text = textNode.textContent;
+      const parent = textNode.parentElement;
+      // Keep code blocks and inline code strictly untouched by font-direction wrappers.
+      if (parent?.closest('pre, code')) return;
       // Check if contains Persian/Arabic characters
       if (/[\u0600-\u06FF\u0750-\u077F]/.test(text)) {
         const parent = textNode.parentNode;
@@ -2527,9 +2611,10 @@ class AIChatApp {
     let textNode; 
     
     while (textNode = walker.nextNode()) { 
-      const parent = textNode.parentNode; 
-      if (parent.tagName !== 'SCRIPT' && parent.tagName !== 'STYLE') { 
-        nodesToProcess.push(textNode); 
+      const parent = textNode.parentElement;
+      // Clickable dictionary spans must not alter code samples or interfere with links.
+      if (parent && !parent.closest('script, style, pre, code, a, button, textarea')) {
+        nodesToProcess.push(textNode);
       } 
     }
     
@@ -2664,7 +2749,7 @@ class AIChatApp {
     };
 
     try {
-      const response = await this.callChatAPI(text);
+      const response = await this.callChatAPI(text, requestChatId);
       loadingWrapper.remove();
       const originChat = this.chats.find(chat => chat.id === requestChatId);
       if (this.currentChatId === requestChatId) {
@@ -2701,61 +2786,129 @@ class AIChatApp {
       }
     }
   }
-  async callChatAPI(message) {
-    if (this.chatProvider === 'gemini') return this.callGeminiChatAPI(message);
-    else if (this.chatProvider === 'avalai') return this.callAvalaiChatAPI(message);
-    else if (this.chatProvider === 'openrouter') return this.callOpenRouterChatAPI(message);
-    else throw new Error("No chat provider selected or API key is missing.");
+  getEffectiveSystemInstructions() {
+    const defaults = [
+      "You are WordLens, a capable and thoughtful general-purpose assistant.",
+      "Reply in the same language as the user's latest message unless the user asks for another language.",
+      "Honor the requested content type, tone, format, and length. If the user asks for a long essay, story, article, comprehensive explanation, or a specific word/page count, provide a genuinely substantial answer rather than a few short paragraphs. Do not arbitrarily shorten a requested long response.",
+      "Use valid, renderable CommonMark Markdown for structured answers. Put a space after Markdown heading markers, for example '# Hello' and '## Introduction'; leave blank lines around headings, lists, block quotes, and fenced code blocks; use '- ' for unordered list items; and format tables with a valid header and separator row.",
+      "Write actual Markdown syntax, not HTML-encoded spaces such as '&#x20;' and not backslash-escaped heading or list markers. Do not wrap ordinary answers in a code fence. Only provide raw Markdown source when explicitly requested.",
+      "Keep simple answers appropriately concise, but never let concision override a clear request for depth or length. If a response is legitimately cut off by a platform limit, make that clear rather than pretending the answer is complete."
+    ].join("\n");
+    const custom = (this.customInstructions || "").trim();
+    return custom
+      ? `${defaults}\n\nAdditional user preferences (apply when compatible with the current request):\n${custom}`
+      : defaults;
   }
 
-  async callGeminiChatAPI(message) {
+  getConversationHistory(chat, currentMessage) {
+    const history = (Array.isArray(chat?.messages) ? chat.messages : [])
+      .filter(item => item && item.role !== "system")
+      .map(item => ({ ...item }));
+    const last = history[history.length - 1];
+    // sendMessage() stores the new user message before requesting a reply.
+    // Remove that one copy here because the current message is appended below.
+    if (
+      last &&
+      last.role === "user" &&
+      String(last.content ?? "").trim() === String(currentMessage ?? "").trim()
+    ) {
+      history.pop();
+    }
+    return history.slice(-10);
+  }
+
+  async callChatAPI(message, chatId = this.currentChatId) {
+    if (this.chatProvider === 'gemini') return this.callGeminiChatAPI(message, chatId);
+    if (this.chatProvider === 'avalai') return this.callAvalaiChatAPI(message, chatId);
+    if (this.chatProvider === 'openrouter') return this.callOpenRouterChatAPI(message, chatId);
+    throw new Error("No chat provider selected or API key is missing.");
+  }
+
+  async callGeminiChatAPI(message, chatId = this.currentChatId) {
     if (!this.API_KEY) throw new Error("Provider 1 API key is not set.");
-    const chat = this.chats.find(c => c.id === this.currentChatId);
+    const chat = this.chats.find(item => item.id === chatId);
     if (!chat) throw new Error("Chat not found");
-    const history = chat.messages.filter(msg => msg.role !== "system").slice(-10).map(msg => ({
-      role: msg.role === "user" ? "user" : "model",
-      parts: [{ text: msg.content }]
+    const history = this.getConversationHistory(chat, message).map(item => ({
+      role: item.role === "user" ? "user" : "model",
+      parts: [{ text: String(item.content ?? "") }]
     }));
-    const requestBody = { contents: [...history, { role: "user", parts: [{ text: message }] }] };
+    const requestBody = {
+      systemInstruction: { parts: [{ text: this.getEffectiveSystemInstructions() }] },
+      contents: [...history, { role: "user", parts: [{ text: message }] }],
+      generationConfig: { maxOutputTokens: 8192, temperature: 0.7 }
+    };
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${this.API_KEY}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody)
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody)
     });
-    if (!response.ok) { const errorText = await response.text(); throw new Error(`Provider 1 API Error: ${response.status}, ${errorText}`); }
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Provider 1 API Error: ${response.status}, ${errorText}`);
+    }
     const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "Sorry, I couldn't get a response from Provider 1.";
+    const answer = data.candidates?.[0]?.content?.parts
+      ?.map(part => typeof part.text === "string" ? part.text : "")
+      .join("") || "";
+    if (!answer.trim()) {
+      const reason = data.candidates?.[0]?.finishReason;
+      throw new Error(reason ? `Provider 1 returned no visible text (finish reason: ${reason}).` : "Provider 1 returned an empty response.");
+    }
+    return answer;
   }
 
-  async callAvalaiChatAPI(message) {
+  async callAvalaiChatAPI(message, chatId = this.currentChatId) {
     if (!this.AVALAI_API_KEY) throw new Error("Provider 2 API key is not set.");
-    const chat = this.chats.find(c => c.id === this.currentChatId);
+    const chat = this.chats.find(item => item.id === chatId);
     if (!chat) throw new Error("Chat not found");
-    const history = chat.messages.filter(msg => msg.role !== "system").slice(-10).map(msg => ({
-      role: msg.role === "user" ? "user" : "assistant", content: msg.content
+    const history = this.getConversationHistory(chat, message).map(item => ({
+      role: item.role === "user" ? "user" : "assistant",
+      content: String(item.content ?? "")
     }));
-    const requestBody = { model: "gpt-5-nano", messages: [...history, { role: "user", content: message }] };
+    const requestBody = {
+      model: "gpt-5-nano",
+      messages: [
+        { role: "system", content: this.getEffectiveSystemInstructions() },
+        ...history,
+        { role: "user", content: message }
+      ],
+      max_completion_tokens: 8192
+    };
     const response = await fetch('https://api.avalai.ir/v1/chat/completions', {
-      method: 'POST', headers: { 'Authorization': `Bearer ${this.AVALAI_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.AVALAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestBody)
     });
-    if (!response.ok) { const errorText = await response.text(); throw new Error(`Provider 2 API Error: ${response.status}, ${errorText}`); }
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Provider 2 API Error: ${response.status}, ${errorText}`);
+    }
     const data = await response.json();
-    return data.choices?.[0]?.message?.content || "Sorry, I couldn't get a response from Provider 2.";
+    const answer = data.choices?.[0]?.message?.content;
+    if (typeof answer !== "string" || !answer.trim()) {
+      throw new Error("Provider 2 returned an empty response.");
+    }
+    return answer;
   }
 
-  async callOpenRouterChatAPI(message) {
+  async callOpenRouterChatAPI(message, chatId = this.currentChatId) {
     if (!this.OPENROUTER_API_KEY) throw new Error("OpenRouter API key is not set.");
-    const chat = this.chats.find(c => c.id === this.currentChatId);
+    const chat = this.chats.find(item => item.id === chatId);
     if (!chat) throw new Error("Chat not found");
 
-    const history = chat.messages
-      .filter(msg => msg.role !== "system")
-      .slice(-10)
-      .map(msg => ({ role: msg.role === "user" ? "user" : "assistant", content: msg.content }));
-
+    const history = this.getConversationHistory(chat, message).map(item => ({
+      role: item.role === "user" ? "user" : "assistant",
+      content: String(item.content ?? "")
+    }));
     const headers = {
       'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
       'Content-Type': 'application/json'
     };
-    // Optional OpenRouter attribution headers; avoid invalid values on file://
+    // Optional OpenRouter attribution headers; avoid invalid values on file://.
     if (typeof location !== 'undefined' && location.origin && location.origin !== 'null') {
       headers['HTTP-Referer'] = location.origin;
     }
@@ -2765,9 +2918,14 @@ class AIChatApp {
 
     const requestBody = {
       model: 'gemma-4-e2b-it',
-      messages: [...history, { role: 'user', content: message }],
+      messages: [
+        { role: 'system', content: this.getEffectiveSystemInstructions() },
+        ...history,
+        { role: 'user', content: message }
+      ],
+      max_completion_tokens: 8192,
+      temperature: 0.7,
       // Free variants may require permissive data-policy routing.
-      // If the account-wide privacy setting is more restrictive, the user must change it in OpenRouter settings.
       provider: { data_collection: 'allow' }
     };
 
@@ -2789,27 +2947,32 @@ class AIChatApp {
           `به https://openrouter.ai/settings/privacy بروید و گزینه/سیاست مربوط به «Free model publication» یا Data Policy را طوری تنظیم کنید که اجازه بدهد (Allow).`
         );
       }
-
       throw new Error(`OpenRouter API Error: ${response.status}, ${errorText}`);
     }
     const data = await response.json();
-    return data.choices?.[0]?.message?.content || "Sorry, I couldn't get a response from OpenRouter.";
+    const answer = data.choices?.[0]?.message?.content;
+    if (typeof answer !== "string" || !answer.trim()) {
+      throw new Error("OpenRouter returned an empty response.");
+    }
+    return answer;
   }
 
   // ---------- Dictionary / Translation ----------
-  async getWordMeaning(word) {
-    if (this.chatProvider === 'avalai') return this.getWordMeaningAvalai(word);
-    if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word);
-    return this.getWordMeaningGemini(word);
+  async getWordMeaning(word, { forceRefresh = false } = {}) {
+    if (this.chatProvider === 'avalai') return this.getWordMeaningAvalai(word, { forceRefresh });
+    if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word, { forceRefresh });
+    return this.getWordMeaningGemini(word, { forceRefresh });
   }
 
-  async getWordMeaningOpenRouter(word) {
+  async getWordMeaningOpenRouter(word, { forceRefresh = false } = {}) {
     const lowerWord = word.toLowerCase().trim();
-    try {
-      const cachedMeaning = await this.db.get('word_meanings', lowerWord);
-      if (cachedMeaning) return cachedMeaning.value;
-    } catch (err) {
-      console.error("Error reading meaning cache:", err);
+    if (!forceRefresh) {
+      try {
+        const cachedMeaning = await this.db.get('word_meanings', lowerWord);
+        if (cachedMeaning) return cachedMeaning.value;
+      } catch (err) {
+        console.error("Error reading meaning cache:", err);
+      }
     }
 
     if (!this.OPENROUTER_API_KEY) {
@@ -2973,9 +3136,16 @@ Be thorough and comprehensive.`;
     }
   }
 
-  async getWordMeaningAvalai(word) {
+  async getWordMeaningAvalai(word, { forceRefresh = false } = {}) {
     const lowerWord = word.toLowerCase().trim();
-    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (cachedMeaning) return cachedMeaning.value; } catch (err) { console.error("Error reading meaning cache:", err); }
+    if (!forceRefresh) {
+      try {
+        const cachedMeaning = await this.db.get('word_meanings', lowerWord);
+        if (cachedMeaning) return cachedMeaning.value;
+      } catch (err) {
+        console.error("Error reading meaning cache:", err);
+      }
+    }
     if (!this.AVALAI_API_KEY) return { meanings: [{ text: `No Provider 2 API Key`, type: "Error" }], synonyms: [], antonyms: [] };
     
     const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
@@ -3038,9 +3208,16 @@ Be thorough and comprehensive.`;
     }
   }
 
-  async getWordMeaningGemini(word) {
+  async getWordMeaningGemini(word, { forceRefresh = false } = {}) {
     const lowerWord = word.toLowerCase().trim();
-    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (cachedMeaning) { return cachedMeaning.value; } } catch (err) { console.error("Error reading meaning cache:", err); }
+    if (!forceRefresh) {
+      try {
+        const cachedMeaning = await this.db.get('word_meanings', lowerWord);
+        if (cachedMeaning) return cachedMeaning.value;
+      } catch (err) {
+        console.error("Error reading meaning cache:", err);
+      }
+    }
     if (!this.API_KEY) return { meanings: [{ text: `No API Key`, type: "Error" }], synonyms: [], antonyms: [] };
     
     const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
@@ -3079,9 +3256,14 @@ Be thorough and comprehensive.`;
     
     const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }], synonyms: [], antonyms: [] });
     try {
-      const modelName = "gemini-2.0-flash-exp";
+      const modelName = "gemini-2.5-flash-lite";
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${this.API_KEY}`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json", temperature: 0.3 } })
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: "application/json", temperature: 0.3, maxOutputTokens: 4096 }
+        })
       });
       if (!response.ok) return returnError(`API Error: ${response.status}`);
       const data = await response.json();
@@ -3116,6 +3298,7 @@ Be thorough and comprehensive.`;
     const antonymsListEl = newPopup.querySelector("#antonyms-list");
     const closeBtn = newPopup.querySelector("#close-word-meaning");
     const playAudioBtn = newPopup.querySelector("#play-word-audio-btn");
+    const retryMeaningBtn = newPopup.querySelector("#retry-word-meaning-btn");
     const reviewWordBtn = newPopup.querySelector("#review-word-btn");
     const addToLeitnerBtn = newPopup.querySelector("#add-to-leitner-btn");
     
@@ -3197,44 +3380,112 @@ Be thorough and comprehensive.`;
     synonymsListEl.addEventListener('click', handleWordClick);
     antonymsListEl.addEventListener('click', handleWordClick);
 
-    // Fetch and render data
-    const meaningData = await this.getWordMeaning(word);
-    meaningsListEl.innerHTML = '';
-    if (meaningData.meanings && meaningData.meanings.length > 0 && meaningData.meanings[0].type !== "Error") {
-      meaningData.meanings.forEach(meaning => {
-        const div = document.createElement("div");
-        div.className = "meaning-item";
-        div.innerHTML = `<div class="meaning-text">${meaning.text}</div><span class="meaning-type">${meaning.type}</span>`;
-        meaningsListEl.appendChild(div);
-      });
-    } else {
-      const errorMessage = meaningData.meanings[0]?.text || "Meaning not found";
-      meaningsListEl.innerHTML = `<div class="meaning-item">${errorMessage}</div>`;
-    }
     const renderWordList = (listElement, wordList, itemClass) => {
-      listElement.innerHTML = '';
-      if (wordList && wordList.length > 0) {
+      listElement.replaceChildren();
+      if (Array.isArray(wordList) && wordList.length > 0) {
         wordList.forEach(itemWord => {
           const container = document.createElement("div");
           container.className = `${itemClass}-container`;
           const span = document.createElement("span");
           span.className = `${itemClass} clickable-word`;
-          span.textContent = itemWord;
+          span.textContent = String(itemWord ?? "");
           const button = document.createElement("button");
+          button.type = "button";
           button.className = "btn-icon btn-audio-word-item";
-          button.dataset.text = itemWord;
+          button.dataset.text = String(itemWord ?? "");
           button.title = `Play ${itemWord}`;
+          button.setAttribute("aria-label", `Play ${itemWord}`);
           button.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon></svg>`;
           container.appendChild(span);
           container.appendChild(button);
           listElement.appendChild(container);
         });
       } else {
-        listElement.innerHTML = `<span class="${itemClass}-item">${itemClass === 'synonym-item' ? 'No synonyms found' : 'No antonyms found'}</span>`;
+        const empty = document.createElement("span");
+        empty.className = `${itemClass}-item`;
+        empty.textContent = itemClass === 'synonym-item' ? 'No synonyms found' : 'No antonyms found';
+        listElement.appendChild(empty);
       }
     };
-    renderWordList(synonymsListEl, meaningData.synonyms, "synonym-item");
-    renderWordList(antonymsListEl, meaningData.antonyms, "antonym-item");
+
+    const renderMeaningData = (meaningData) => {
+      meaningsListEl.replaceChildren();
+      const meanings = Array.isArray(meaningData?.meanings) ? meaningData.meanings : [];
+      const isError = meanings.length === 0 || meanings[0]?.type === "Error";
+
+      if (isError) {
+        const error = document.createElement("div");
+        error.className = "meaning-item";
+        error.textContent = meanings[0]?.text || "Meaning not found";
+        meaningsListEl.appendChild(error);
+        renderWordList(synonymsListEl, [], "synonym-item");
+        renderWordList(antonymsListEl, [], "antonym-item");
+        return;
+      }
+
+      meanings.forEach(meaning => {
+        const div = document.createElement("div");
+        div.className = "meaning-item";
+        const textEl = document.createElement("div");
+        textEl.className = "meaning-text";
+        textEl.textContent = String(meaning?.text ?? "");
+        const typeEl = document.createElement("span");
+        typeEl.className = "meaning-type";
+        typeEl.textContent = String(meaning?.type ?? "");
+        div.appendChild(textEl);
+        div.appendChild(typeEl);
+        meaningsListEl.appendChild(div);
+      });
+
+      renderWordList(synonymsListEl, meaningData.synonyms, "synonym-item");
+      renderWordList(antonymsListEl, meaningData.antonyms, "antonym-item");
+    };
+
+    let meaningRequestVersion = 0;
+    const loadMeaning = async (forceRefresh = false) => {
+      const requestVersion = ++meaningRequestVersion;
+      if (retryMeaningBtn) {
+        retryMeaningBtn.disabled = true;
+        retryMeaningBtn.setAttribute("aria-busy", "true");
+        retryMeaningBtn.classList.toggle("is-loading", forceRefresh);
+        retryMeaningBtn.title = forceRefresh ? "Refreshing meaning…" : "Loading meaning…";
+      }
+
+      const loading = document.createElement("div");
+      loading.className = "meaning-item";
+      loading.textContent = forceRefresh ? "Getting a fresh meaning…" : "Loading meaning…";
+      meaningsListEl.replaceChildren(loading);
+      synonymsListEl.replaceChildren();
+      antonymsListEl.replaceChildren();
+
+      try {
+        const meaningData = await this.getWordMeaning(word, { forceRefresh });
+        if (!newPopup.isConnected || requestVersion !== meaningRequestVersion) return;
+        renderMeaningData(meaningData);
+      } catch (error) {
+        console.error("Failed to load word meaning:", error);
+        if (!newPopup.isConnected || requestVersion !== meaningRequestVersion) return;
+        const errorItem = document.createElement("div");
+        errorItem.className = "meaning-item";
+        errorItem.textContent = error?.message || "Unable to load the meaning. Please try again.";
+        meaningsListEl.replaceChildren(errorItem);
+        renderWordList(synonymsListEl, [], "synonym-item");
+        renderWordList(antonymsListEl, [], "antonym-item");
+      } finally {
+        if (newPopup.isConnected && requestVersion === meaningRequestVersion && retryMeaningBtn) {
+          retryMeaningBtn.disabled = false;
+          retryMeaningBtn.removeAttribute("aria-busy");
+          retryMeaningBtn.classList.remove("is-loading");
+          retryMeaningBtn.title = "Refresh meaning";
+        }
+      }
+    };
+
+    retryMeaningBtn?.addEventListener("click", () => {
+      void loadMeaning(true);
+    });
+
+    await loadMeaning(false);
   }
 
   playLeitnerCardAudio() { if (this.currentCard) { this.playTextToSpeech(this.currentCard.word, this.leitnerPlayAudioBtn, null, null); } }
@@ -4131,7 +4382,8 @@ Be thorough and comprehensive.`;
           avalai_api_key: this.AVALAI_API_KEY || '',
           openrouter_api_key: this.OPENROUTER_API_KEY || '',
           elevenlabs_api_key: this.ELEVENLABS_API_KEY || '',
-          elevenlabs_voice_id: this.ELEVENLABS_VOICE_ID || ''
+          elevenlabs_voice_id: this.ELEVENLABS_VOICE_ID || '',
+          custom_instructions: this.customInstructions || ''
         },
         indexedDB: {
           word_meanings: wordMeanings || [],
@@ -4281,6 +4533,11 @@ Be thorough and comprehensive.`;
           localStorage.setItem('theme', this.theme);
           this.applyTheme(this.theme);
           if (this.themeSelect) this.themeSelect.value = this.theme;
+        }
+        if (typeof localData.custom_instructions === 'string') {
+          this.customInstructions = localData.custom_instructions;
+          localStorage.setItem('custom_instructions', this.customInstructions);
+          if (this.customInstructionsInput) this.customInstructionsInput.value = this.customInstructions;
         }
         if (typeof localData.gemini_api_key === 'string') {
           this.API_KEY = localData.gemini_api_key;
