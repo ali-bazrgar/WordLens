@@ -240,7 +240,7 @@ class WordLensHandler(SimpleHTTPRequestHandler):
 
         if clean_path == "/local-api/audio/transcriptions":
             if not STT_BASE:
-                self._send_json_error(503, "STT upstream is not configured. Set WORDLENS_STT_BASE to your OpenAI-compatible STT API base URL, then restart server.py.")
+                self._send_json_error(503, "STT upstream is not configured. Enter the STT Base URL in Settings > Provider 3 > API Connections and save, or set WORDLENS_STT_BASE before starting server.py.")
                 return
             self._proxy(openai_endpoint(STT_BASE, "/audio/transcriptions"), body)
             return
@@ -263,7 +263,7 @@ def main():
     print(f"Web:      http://0.0.0.0:{PORT}")
     print(f"LLM:      {openai_endpoint(LLM_BASE, '/models')}")
     print(f"TTS:      {openai_endpoint(TTS_BASE, '/audio/speech')}")
-    print(f"STT:      {openai_endpoint(STT_BASE, '/audio/transcriptions') if STT_BASE else 'not configured (WORDLENS_STT_BASE is empty)'}")
+    print(f"STT:      {openai_endpoint(STT_BASE, '/audio/transcriptions') if STT_BASE else 'not configured (set it in WordLens Settings or WORDLENS_STT_BASE)'}")
     print("Local API: /local-api/*")
     print("==========================================")
     try:
