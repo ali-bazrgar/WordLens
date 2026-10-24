@@ -47,7 +47,9 @@ The headset button next to the original microphone button toggles hands-free, pa
 
 Open or create a chat first and allow microphone access. Browsers require a secure context for microphone capture. Prefer HTTPS with a trusted certificate; for a temporary local-LAN test in Chrome, the private IP origin may need to be explicitly treated as secure in `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, followed by a browser relaunch. This flag relaxes security protections and should only be used for your trusted local WordLens server.
 
-When WordLens is opened from a private LAN address (for example, `http://192.168.x.x:8000`), the app forces API requests through that host's `/local-api` proxy. It does not call `127.0.0.1` from the phone, because that would refer to the phone itself. Upstream LLM/TTS/STT Base URLs are loaded from the WordLens server and are read-only on a remote phone; edit them on the PC running `server.py`. Model IDs and language preferences may still be stored locally on the phone.
+When WordLens is opened from a private LAN address (for example, `http://192.168.x.x:8000`), **Local proxy** mode sends API requests through that host's `/local-api` proxy. The upstream LLM/TTS/STT Base URLs are controlled by the PC running `server.py` and are read-only on a remote phone in this mode.
+
+The **Direct API** option remains available on phones if the local proxy cannot be reached. In Direct mode, the browser calls the API services itself, so use the PC's LAN address (not `127.0.0.1` or `localhost`) for each service. The services must listen for LAN connections, allow browser CORS, and be permitted through Windows Firewall. The app converts loopback Base URLs to the current WordLens host IP when possible, but this cannot configure the model servers or firewall automatically.
 
 Before opening the microphone, Live Conversation checks the local proxy, LLM/TTS health, and whether an STT URL is configured; transcription errors identify the failed request and include LAN connectivity guidance when applicable.
 
