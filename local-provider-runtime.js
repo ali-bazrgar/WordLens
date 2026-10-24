@@ -76,8 +76,7 @@
     return base + '/v1';
   };
 
-  // A phone opening WordLens at a private LAN address must use the server-side
-  // proxy. Loopback URLs such as 127.0.0.1 refer to the phone itself, not the PC.
+  // Detect WordLens opened from another device over a private LAN.
   const isLanHostedClient = () => {
     const hostname = String(window.location?.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
     if (!hostname || ['localhost', '127.0.0.1', '::1'].includes(hostname)) return false;
@@ -91,8 +90,22 @@
     return hostname.endsWith('.local') || /^(?:fc|fd)[0-9a-f:]*$/i.test(hostname) ||
       /^fe80:/i.test(hostname);
   };
-  const usesProxy = () => isLanHostedClient() || getCfg('apiMode') !== 'direct';
-  if (isLanHostedClient() && getCfg('apiMode') === 'direct') setCfg('apiMode', 'proxy');
+  // Respect the user's connection-mode selection. Proxy is the easiest LAN setup,
+  // while Direct remains available for environments where the proxy cannot be used.
+  const usesProxy = () => getCfg('apiMode') !== 'direct';
+
+  const makeLanServiceUrl = (value) => {
+    const raw = normalizeBase(value);
+    if (!isLanHostedClient() || !raw) return raw;
+    try {
+      const url = new URL(raw);
+      if (['localhost', '127.0.0.1', '::1'].includes(url.hostname.toLowerCase())) {
+        url.hostname = window.location.hostname;
+        return url.toString().replace(/\/$/, '');
+      }
+    } catch (_) {}
+    return raw;
+  };
 
   const fetchWithNetworkDiagnostics = async (url, options, label) => {
     try {
@@ -124,10 +137,10 @@
   };
 
   const syncProxyConfig = async () => {
-    // Upstream URLs are host-machine settings. Do not overwrite them from a
-    // phone or another LAN client.
-    if (isLanHostedClient()) return { skipped: true, reason: 'lan-client' };
     if (getCfg('apiMode') === 'direct') return { skipped: true, reason: 'direct-mode' };
+    // Proxy upstream URLs belong to the host machine and cannot be changed
+    // from a phone or another LAN client.
+    if (isLanHostedClient()) return { skipped: true, reason: 'lan-client' };
     const response = await fetch('/local-api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -420,7 +433,7 @@
     section.innerHTML = `
       <p><b>Provider 3 — API Connections</b></p>
       <small style="color:#666;display:block;margin-bottom:8px;">Enter each API's real upstream address below. Local proxy mode (recommended) saves these addresses on this computer and avoids browser CORS. Direct mode calls the URLs from your browser and requires CORS support.</small>
-      <div id="local-lan-config-note" style="display:none;margin:8px 0;padding:10px;border-radius:8px;background:rgba(0,136,204,0.08);font-size:12px;">You opened WordLens from another device on the local network. Requests are routed through this PC's proxy automatically. Upstream server addresses can only be changed on the PC running WordLens; this screen can still save device-local preferences such as model IDs and language.</div>
+      <div id="local-lan-config-note" style="display:none;margin:8px 0;padding:10px;border-radius:8px;background:rgba(0,136,204,0.08);font-size:12px;"></div>
       <label style="display:block;margin:8px 0 4px;">Connection Mode</label>
       <select id="local-api-mode" class="settings-select">
         <option value="proxy">Local proxy — recommended</option>
@@ -498,33 +511,60 @@
       sttModel: document.getElementById('local-stt-model'),
       sttLanguage: document.getElementById('local-stt-language')
     };
-    if (isLanHostedClient()) {
-      setCfg('apiMode', 'proxy');
-      apiModeField.value = 'proxy';
-      apiModeField.disabled = true;
-      ['llmBase', 'ttsBase', 'sttBase'].forEach(key => { if (fields[key]) fields[key].disabled = true; });
-      const note = document.getElementById('local-lan-config-note');
-      if (note) note.style.display = 'block';
-    }
-    loadProxyConfig(fields);
+    const lanNote = document.getElementById('local-lan-config-note');
+    const updateLanModeUi = () => {
+      if (isLanHostedClient()) {
+        const direct = apiModeField.value === 'direct';
+        ['llmBase', 'ttsBase', 'sttBase'].forEach(key => {
+          if (!fields[key]) return;
+          fields[key].disabled = !direct;
+          if (direct) {
+            const accessible = makeLanServiceUrl(fields[key].value);
+            if (accessible !== fields[key].value) fields[key].value = accessible;
+          }
+        });
+        if (lanNote) {
+          lanNote.style.display = 'block';
+          lanNote.textContent = direct
+            ? 'Direct mode sends requests from this phone to the API services directly. Loopback URLs are changed to this PC’s LAN address when possible. The model services must listen on the LAN and permit browser CORS; Windows Firewall must allow their ports.'
+            : 'Proxy mode routes requests through this WordLens server. API Base URLs are controlled by the PC running server.py and are read-only on this phone. If the proxy itself is unreachable, select Direct mode and configure the service URLs for the PC’s LAN address.';
+        }
+      }
+    };
+    updateLanModeUi();
+    loadProxyConfig(fields).then(updateLanModeUi);
     apiModeField.addEventListener('change', () => {
+      setCfg('apiMode', apiModeField.value);
+      if (apiModeField.value === 'direct') {
+        ['llmBase', 'ttsBase', 'sttBase'].forEach(key => {
+          if (fields[key]) {
+            fields[key].value = makeLanServiceUrl(fields[key].value);
+            setCfg(key, fields[key].value);
+          }
+        });
+      }
+      updateLanModeUi();
       const status = document.getElementById('local-provider-status');
       status.textContent = apiModeField.value === 'proxy'
-        ? 'Local proxy mode saves the Base URLs below into server.py settings.'
-        : 'Direct mode calls these URLs from the browser; each API must allow CORS.';
+        ? 'Local proxy mode routes API calls through server.py on the host PC.'
+        : 'Direct mode calls APIs from this browser. On a phone, use the PC’s LAN IP (not 127.0.0.1) and enable CORS on the APIs.';
     });
 
     document.getElementById('local-provider-test').addEventListener('click', async () => {
       const status = document.getElementById('local-provider-status');
       Object.entries(fields).forEach(([key, element]) => { if (element) setCfg(key, element.value); });
-      status.textContent = isLanHostedClient() ? 'Testing through this PC’s local proxy…' : 'Saving addresses and testing LLM + TTS…';
+      status.textContent = isLanHostedClient() && usesProxy() ? 'Testing through this PC’s local proxy…' : 'Testing direct LLM + TTS connections…';
       try {
         const proxySync = await syncProxyConfig();
         const llmSample = await localCompletion([{ role: 'user', content: 'Reply with exactly OK.' }], { temperature: 0, max_tokens: 8 });
         const ttsSample = await localTTS('Hello, this is a local text to speech test.');
         if (!(ttsSample instanceof Blob) || ttsSample.size === 0) throw new Error('TTS synthesis returned no audio.');
         const sttHint = getCfg('sttProvider') === 'avalai' ? 'Avalai STT key is checked when recording.' : (!getCfg('sttBase') ? 'Enter the actual STT Base URL before transcribing.' : 'STT is tested on the first recording.');
-        const lanHint = proxySync?.reason === 'lan-client' ? ' Server URLs remain controlled by the PC; this phone uses its proxy.' : '';
+        const lanHint = proxySync?.reason === 'lan-client' && usesProxy()
+          ? ' Server URLs remain controlled by the PC; this phone uses its proxy.'
+          : proxySync?.reason === 'direct-mode' && isLanHostedClient()
+            ? ' Direct mode requires the API services to accept LAN requests and browser CORS.'
+            : '';
         status.textContent = 'OK — LLM replied “' + llmSample.slice(0,60) + '”; TTS returned ' + Math.round(ttsSample.size/1024) + ' KB audio. ' + sttHint + lanHint;
       } catch (error) { status.textContent = 'Error: ' + error.message; console.error('Local Provider 3 test failed:', error); }
     });
@@ -626,8 +666,10 @@
       let proxySync = null;
       try { proxySync = await syncProxyConfig(); } catch (error) { proxyError = error; console.error('API proxy settings could not be saved:', error); }
       originalSaveSettings.call(this);
-      if (proxySync?.reason === 'lan-client') {
-        this.showToast('Device settings saved. Server addresses are read-only from the phone; change them on the PC running WordLens.', 'warning');
+      if (proxySync?.reason === 'lan-client' && getCfg('apiMode') === 'proxy') {
+        this.showToast('Device settings saved. In proxy mode, server addresses are read-only from the phone; change them on the PC running WordLens.', 'warning');
+      } else if (proxySync?.reason === 'direct-mode' && isLanHostedClient()) {
+        this.showToast('Direct mode saved. Make sure the API URLs use the PC’s LAN address and the API servers allow CORS.', 'warning');
       } else if (proxyError && getCfg('apiMode') === 'proxy') {
         this.showToast('Browser settings saved, but local API addresses were not updated. Open WordLens on the PC at http://127.0.0.1:8000. ' + proxyError.message, 'warning');
       } else {
