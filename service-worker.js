@@ -15,5 +15,7 @@ self.addEventListener('activate', event => {
 // Deliberately do not rewrite/cache application resources here.
 // server.py is the authoritative same-origin Local Provider bridge.
 self.addEventListener('fetch', event => {
-  event.respondWith(fetch(event.request, { cache: 'no-store' }));
+  // Preserve request metadata and bodies exactly, including mobile multipart
+  // microphone uploads. The server's no-cache headers keep app assets fresh.
+  event.respondWith(fetch(event.request));
 });
