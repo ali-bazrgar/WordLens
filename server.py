@@ -86,14 +86,11 @@ class WordLensHandler(SimpleHTTPRequestHandler):
             self.wfile.write(payload)
 
     def _serve_app_js(self):
+        """Serve app.js unchanged; local-provider-runtime.js is loaded explicitly by index.html."""
         app_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.js")
-        runtime_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local-provider-runtime.js")
         try:
             with open(app_path, "r", encoding="utf-8") as app_file:
-                source = app_file.read()
-            with open(runtime_path, "r", encoding="utf-8") as runtime_file:
-                runtime = runtime_file.read()
-            payload = (source + "\n\n/* --- Local Provider 3 runtime --- */\n" + runtime + "\n").encode("utf-8")
+                payload = app_file.read().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/javascript; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
