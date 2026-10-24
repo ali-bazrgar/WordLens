@@ -452,6 +452,8 @@
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="app.js"></script>
+  <!-- Loaded explicitly so voice controls and API settings also work when app.js is served as a plain file. -->
+  <script src="local-provider-runtime.js"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
