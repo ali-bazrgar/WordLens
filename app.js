@@ -3855,7 +3855,7 @@ Be thorough and comprehensive.`;
     const reviewedAt = reviewTime.toISOString();
     const nextState = isAgain ? (isNew ? "learning" : "relearning") : "review";
     const reps = state.reps + 1;
-    const lapses = state.lapses + (isAgain && !isNew ? 1 : 0);
+    const lapses = state.lapses + (isAgain && state.state === "review" ? 1 : 0);
     const logEntry = {
       rating: grade,
       reviewedAt,
