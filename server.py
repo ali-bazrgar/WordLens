@@ -4,6 +4,7 @@ import http.client
 import queue
 import select
 import socket
+import struct
 import threading
 import json
 import os
@@ -158,10 +159,28 @@ class WordLensHandler(SimpleHTTPRequestHandler):
         connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         connection = connection_type(parsed.hostname, parsed.port, timeout=300)
         events = queue.Queue()
+        cancel_requested = threading.Event()
+
+        def cancel_upstream():
+            # A zero-time SO_LINGER closes with TCP RST, giving model servers a
+            # stronger cancellation signal than merely abandoning the response.
+            cancel_requested.set()
+            upstream_socket = connection.sock
+            if upstream_socket is not None:
+                try:
+                    upstream_socket.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh", 1, 0))
+                except OSError:
+                    pass
+            connection.close()
 
         def fetch_upstream():
             try:
+                if cancel_requested.is_set():
+                    return
                 connection.request(self.command, path, body=body, headers=headers)
+                if cancel_requested.is_set():
+                    cancel_upstream()
+                    return
                 response = connection.getresponse()
                 events.put(("headers", response.status, response.headers.get("Content-Type", "application/octet-stream")))
                 while True:
@@ -196,7 +215,7 @@ class WordLensHandler(SimpleHTTPRequestHandler):
                 # Check on every iteration, including while response chunks are
                 # queued, so a fast producer can't hide a browser cancellation.
                 if downstream_disconnected():
-                    connection.close()
+                    cancel_upstream()
                     return
                 try:
                     kind, value, *extra = events.get(timeout=0.1)
@@ -229,9 +248,9 @@ class WordLensHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(payload)
                     return
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
-            # The browser cancelled the request. Closing upstream abandons the
-            # streamed generation instead of keeping it alive for the full answer.
-            connection.close()
+            # The browser cancelled the request; reset upstream so the model server
+            # can stop generation rather than finishing work the user no longer needs.
+            cancel_upstream()
             return
         finally:
             connection.close()
