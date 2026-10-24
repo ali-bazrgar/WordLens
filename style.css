@@ -2963,3 +2963,71 @@ body.theme-rgb-glass .btn-send:hover {
 @media (prefers-reduced-motion: reduce) {
   .messages-container { scroll-behavior: auto; }
 }
+
+
+/* Custom AI role instructions */
+.settings-textarea {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  box-sizing: border-box;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color, #d1d5db);
+  border-radius: 10px;
+  color: var(--text-color, #111827);
+  background: var(--input-bg, var(--card-bg, #fff));
+  font: inherit;
+  line-height: 1.5;
+}
+.custom-instructions-section > label {
+  display: block;
+  font-weight: 600;
+}
+.custom-instructions-section > small {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted-text, #6b7280);
+  line-height: 1.45;
+}
+
+/* Force-regenerate the cached dictionary entry. */
+.btn-refresh-meaning {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color, #d1d5db);
+  border-radius: 9px;
+  color: var(--text-color, #374151);
+  background: var(--card-bg, transparent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-refresh-meaning:hover:not(:disabled) {
+  background: var(--hover-bg, rgba(127, 127, 127, .12));
+}
+.btn-refresh-meaning:disabled {
+  opacity: .65;
+  cursor: wait;
+}
+.btn-refresh-meaning.is-loading svg {
+  animation: wordlens-meaning-refresh-spin .9s linear infinite;
+}
+@keyframes wordlens-meaning-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+@media (max-width: 480px) {
+  .word-meaning-popup .popup-header-actions {
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .btn-refresh-meaning {
+    padding: 5px 7px;
+    font-size: 11px;
+  }
+}
