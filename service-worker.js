@@ -1,6 +1,6 @@
-const CACHE_NAME = 'wordlens-app-v25-persian-retry';
+const CACHE_NAME = 'wordlens-app-v26-synonyms';
 const APP_BASE = self.registration.scope;
-const APP_VERSION = '20261024-persian-retry-v25';
+const APP_VERSION = '20261024-synonyms-v26';
 
 // The app shell, local data, and flashcards work offline after one successful
 // online visit. API endpoints are intentionally never cached.
