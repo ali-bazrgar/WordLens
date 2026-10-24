@@ -313,6 +313,7 @@ class AIChatApp {
     this.theme = localStorage.getItem("theme") || "light";
     this.fontSize = parseInt(localStorage.getItem("font_size")) || 14;
     this.boldText = localStorage.getItem("bold_text") === "true";
+    this.customInstructions = localStorage.getItem("custom_instructions") || "";
     this.chats = JSON.parse(localStorage.getItem("chats")) || [];
     try {
       this.documents = JSON.parse(localStorage.getItem("documents")) || [];
@@ -439,6 +440,7 @@ class AIChatApp {
     this.themeSelect = document.getElementById("theme-select");
     this.fontSizeSelect = document.getElementById("font-size-select");
     this.boldTextCheckbox = document.getElementById("bold-text-checkbox");
+    this.customInstructionsInput = document.getElementById("custom-instructions-input");
     this.saveSettingsBtn = document.getElementById("save-settings");
     this.cancelSettingsBtn = document.getElementById("cancel-settings");
     this.app = document.getElementById("app");
@@ -780,6 +782,7 @@ class AIChatApp {
     this.fontSizeSelect.value = this.fontSize;
     document.getElementById("font-size-value").textContent = this.fontSize;
     this.boldTextCheckbox.checked = this.boldText;
+    if (this.customInstructionsInput) this.customInstructionsInput.value = this.customInstructions;
     this.settingsModal.classList.remove("hidden");
   }
 
@@ -797,6 +800,9 @@ class AIChatApp {
     const theme = this.themeSelect.value;
     const fontSize = this.fontSizeSelect.value;
     const boldText = this.boldTextCheckbox.checked;
+    const customInstructions = this.customInstructionsInput ? this.customInstructionsInput.value.trim() : (this.customInstructions || "");
+    localStorage.setItem("custom_instructions", customInstructions);
+    this.customInstructions = customInstructions;
     
     localStorage.setItem("gemini_api_key", geminiKey);
     this.API_KEY = geminiKey;
@@ -1040,6 +1046,65 @@ class AIChatApp {
     return d;
   }
 
+  normalizeFSRSState(card, lastReviewedFallback = null, repetitionsFallback = 0, intervalFallback = 0) {
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+    const nonNegativeInteger = value => Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : 0;
+    const toIso = value => {
+      if (!value) return null;
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? null : date.toISOString();
+    };
+    const raw = card && card.fsrs && typeof card.fsrs === "object" ? card.fsrs : null;
+    const validStates = new Set(["new", "learning", "review", "relearning"]);
+    if (raw && Number(raw.version) === 6 && Number.isFinite(Number(raw.stability)) && Number.isFinite(Number(raw.difficulty))) {
+      return {
+        version: 6,
+        stability: Math.max(0, Number(raw.stability)),
+        difficulty: clamp(Number(raw.difficulty), 1, 10),
+        state: validStates.has(raw.state) ? raw.state : "review",
+        reps: nonNegativeInteger(raw.reps ?? repetitionsFallback),
+        lapses: nonNegativeInteger(raw.lapses),
+        lastReview: toIso(raw.lastReview) || toIso(lastReviewedFallback),
+        scheduledDays: Math.max(0, Number.isFinite(Number(raw.scheduledDays)) ? Number(raw.scheduledDays) : Number(intervalFallback) || 0),
+        elapsedDays: Math.max(0, Number(raw.elapsedDays) || 0),
+        retrievability: clamp(Number.isFinite(Number(raw.retrievability)) ? Number(raw.retrievability) : 1, 0, 1),
+        desiredRetention: clamp(Number(raw.desiredRetention) || 0.9, 0.7, 0.99),
+        reviewLog: Array.isArray(raw.reviewLog) ? raw.reviewLog.slice(-50) : []
+      };
+    }
+
+    // Migrate legacy SM-2 records without losing their existing due dates or counters.
+    const reps = nonNegativeInteger(repetitionsFallback);
+    const interval = Math.max(0, Number(intervalFallback) || 0);
+    const inferredLastReview = toIso(lastReviewedFallback) || (() => {
+      if (reps <= 0) return null;
+      const dueIso = toIso(card?.dueDate);
+      if (!dueIso) return null;
+      const approximate = new Date(dueIso);
+      approximate.setDate(approximate.getDate() - interval);
+      return approximate.toISOString();
+    })();
+    const easeFactor = clamp(Number(card?.easeFactor) || 2.5, 1.3, 2.5);
+    const legacyDifficulty = clamp(10 - ((easeFactor - 1.3) / 1.2) * 9, 1, 10);
+    const legacyStatus = String(card?.status || "").toLowerCase();
+    const legacyLearning = legacyStatus === "learning" || legacyStatus === "relearning";
+    const hasPriorMemory = reps > 0 || legacyLearning;
+    return {
+      version: 6,
+      stability: hasPriorMemory ? Math.max(0.1, interval || 1) : 0,
+      difficulty: hasPriorMemory ? legacyDifficulty : 5,
+      state: legacyLearning ? legacyStatus : (reps > 0 ? "review" : "new"),
+      reps,
+      lapses: 0,
+      lastReview: inferredLastReview,
+      scheduledDays: interval,
+      elapsedDays: 0,
+      retrievability: 1,
+      desiredRetention: 0.9,
+      reviewLog: []
+    };
+  }
+
   normalizeLeitnerCardForStorage(card) {
     if (!card || typeof card !== 'object') return null;
     if (!card.id || typeof card.id !== 'string') return null;
@@ -1080,6 +1145,7 @@ class AIChatApp {
     const easeFactorRaw = Number.isFinite(card.easeFactor) ? card.easeFactor : 2.5;
     const easeFactor = Math.max(1.3, easeFactorRaw);
     const status = typeof card.status === 'string' ? card.status : (repetitions === 0 ? 'new' : 'review');
+    const fsrsState = this.normalizeFSRSState(card, lastReviewed, repetitions, interval);
 
     const fixedCard = {
       ...card,
@@ -1094,7 +1160,8 @@ class AIChatApp {
       interval,
       easeFactor,
       lastReviewed,
-      status
+      status,
+      fsrs: fsrsState
     };
 
     const needsWrite =
@@ -1107,7 +1174,8 @@ class AIChatApp {
       fixedCard.interval !== card.interval ||
       fixedCard.easeFactor !== card.easeFactor ||
       fixedCard.lastReviewed !== card.lastReviewed ||
-      fixedCard.status !== card.status;
+      fixedCard.status !== card.status ||
+      JSON.stringify(fixedCard.fsrs) !== JSON.stringify(card.fsrs);
 
     return { fixedCard, oldId: card.id, newId, needsWrite };
   }
@@ -1115,42 +1183,39 @@ class AIChatApp {
   mergeLeitnerCards(existingCard, incomingCard) {
     const existingRep = Number.isFinite(existingCard?.repetitions) ? existingCard.repetitions : 0;
     const incomingRep = Number.isFinite(incomingCard?.repetitions) ? incomingCard.repetitions : 0;
-
     const existingLast = existingCard?.lastReviewed ? new Date(existingCard.lastReviewed) : null;
     const incomingLast = incomingCard?.lastReviewed ? new Date(incomingCard.lastReviewed) : null;
     const existingLastTs = existingLast && !Number.isNaN(existingLast.getTime()) ? existingLast.getTime() : -1;
     const incomingLastTs = incomingLast && !Number.isNaN(incomingLast.getTime()) ? incomingLast.getTime() : -1;
 
-    const winner =
-      incomingRep > existingRep ? incomingCard :
-      existingRep > incomingRep ? existingCard :
-      incomingLastTs > existingLastTs ? incomingCard : existingCard;
+    // A single scheduler state must own both memory and due date. Prefer the most recently
+    // reviewed record; use repetition count only as a tie-breaker for legacy records.
+    const winner = incomingLastTs > existingLastTs
+      ? incomingCard
+      : existingLastTs > incomingLastTs
+        ? existingCard
+        : incomingRep > existingRep ? incomingCard : existingCard;
 
-    const createdAt = this.coerceIsoDate(
-      (existingCard?.createdAt && incomingCard?.createdAt)
-        ? (new Date(existingCard.createdAt) < new Date(incomingCard.createdAt) ? existingCard.createdAt : incomingCard.createdAt)
-        : (existingCard?.createdAt || incomingCard?.createdAt),
-      null
-    );
+    const dates = [existingCard?.createdAt, incomingCard?.createdAt]
+      .map(value => value ? new Date(value) : null)
+      .filter(value => value && !Number.isNaN(value.getTime()));
+    const createdAt = dates.length
+      ? new Date(Math.min(...dates.map(value => value.getTime()))).toISOString()
+      : new Date().toISOString();
 
-    const dueA = existingCard?.dueDate ? new Date(existingCard.dueDate) : null;
-    const dueB = incomingCard?.dueDate ? new Date(incomingCard.dueDate) : null;
-    const dueATs = dueA && !Number.isNaN(dueA.getTime()) ? dueA.getTime() : Number.POSITIVE_INFINITY;
-    const dueBTs = dueB && !Number.isNaN(dueB.getTime()) ? dueB.getTime() : Number.POSITIVE_INFINITY;
-    const dueDate = this.coerceIsoDate(dueATs <= dueBTs ? existingCard?.dueDate : incomingCard?.dueDate, createdAt);
-
-    const todayMidnight = this.getMidnightLocal(new Date());
-    const dueMidnight = this.getMidnightLocal(dueDate);
-    const intervalDays = (todayMidnight && dueMidnight)
-      ? Math.max(0, Math.round((dueMidnight.getTime() - todayMidnight.getTime()) / (24 * 60 * 60 * 1000)))
-      : (Number.isFinite(winner?.interval) ? winner.interval : 0);
-
-    const lastReviewedIso = this.coerceIsoDate(incomingLastTs >= existingLastTs ? incomingCard?.lastReviewed : existingCard?.lastReviewed, null);
-    const lastReviewed = (incomingLastTs >= 0 || existingLastTs >= 0) ? lastReviewedIso : null;
+    const winnerLast = winner?.lastReviewed ? new Date(winner.lastReviewed) : null;
+    const lastReviewed = winnerLast && !Number.isNaN(winnerLast.getTime()) ? winnerLast.toISOString() : null;
+    const repetitions = Number.isFinite(winner?.fsrs?.reps)
+      ? winner.fsrs.reps
+      : Math.max(existingRep, incomingRep);
+    const interval = Number.isFinite(winner?.fsrs?.scheduledDays)
+      ? Math.max(0, Math.floor(winner.fsrs.scheduledDays))
+      : (Number.isFinite(winner?.interval) ? Math.max(0, Math.floor(winner.interval)) : 0);
+    const dueDate = this.coerceIsoDate(winner?.dueDate, createdAt);
+    const fsrs = this.normalizeFSRSState(winner, lastReviewed, repetitions, interval);
 
     return {
       ...winner,
-      // Force canonical identity from incoming (already normalized)
       id: incomingCard.id,
       word: incomingCard.word,
       scopeType: incomingCard.scopeType,
@@ -1158,10 +1223,11 @@ class AIChatApp {
       scopeKey: incomingCard.scopeKey,
       createdAt,
       dueDate,
-      repetitions: Math.max(existingRep, incomingRep),
-      interval: intervalDays,
+      repetitions,
+      interval,
       easeFactor: Math.max(1.3, Number.isFinite(winner?.easeFactor) ? winner.easeFactor : 2.5),
-      lastReviewed
+      lastReviewed,
+      fsrs
     };
   }
 
@@ -1246,18 +1312,22 @@ class AIChatApp {
     this.updateLeitnerHighlights();
   }
 
+  isNewFSRSCard(card) {
+    if (!card) return false;
+    return card.fsrs ? card.fsrs.state === "new" : (card.repetitions || 0) === 0;
+  }
+
   evaluateCardDueState(card) {
-    if (!card) return { state: 'none' };
-    
-    const now = this.getMidnightLocal(new Date());
+    if (!card) return { state: "none" };
+    const now = new Date();
+    const todayStart = this.getMidnightLocal(now);
     const dueIso = this.coerceIsoDate(card.dueDate, card.createdAt);
-    const due = this.getMidnightLocal(dueIso) || (now ? new Date(now) : new Date());
-    
-    const isDue = now ? (due.getTime() <= now.getTime()) : true;
-    const overdue = now ? (due.getTime() < now.getTime()) : false;
-    
+    const dueDate = dueIso ? new Date(dueIso) : new Date(now);
+    if (Number.isNaN(dueDate.getTime())) return { state: "none", dueDate: dueIso, card };
+    const isDue = dueDate.getTime() <= now.getTime();
+    const overdue = !!todayStart && dueDate.getTime() < todayStart.getTime();
     return {
-      state: isDue ? (overdue ? 'overdue' : 'due') : (((card.repetitions || 0) === 0) ? 'new' : 'scheduled'),
+      state: isDue ? (overdue ? "overdue" : "due") : (this.isNewFSRSCard(card) ? "new" : "scheduled"),
       dueDate: dueIso,
       card
     };
@@ -2623,6 +2693,10 @@ class AIChatApp {
     });
   }
 
+  getCustomInstructions() {
+    return String(this.customInstructions ?? localStorage.getItem("custom_instructions") ?? "").trim();
+  }
+
   async sendMessage() {
     const text = this.messageInput.value.trim();
     if (!text || !this.currentChatId) return;
@@ -2716,7 +2790,11 @@ class AIChatApp {
       role: msg.role === "user" ? "user" : "model",
       parts: [{ text: msg.content }]
     }));
+    const lastHistoryItem = history[history.length - 1];
+    if (lastHistoryItem?.role === "user" && lastHistoryItem.parts?.[0]?.text === message) history.pop();
     const requestBody = { contents: [...history, { role: "user", parts: [{ text: message }] }] };
+    const customInstructions = this.getCustomInstructions();
+    if (customInstructions) requestBody.systemInstruction = { parts: [{ text: customInstructions }] };
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${this.API_KEY}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody)
     });
@@ -2732,7 +2810,11 @@ class AIChatApp {
     const history = chat.messages.filter(msg => msg.role !== "system").slice(-10).map(msg => ({
       role: msg.role === "user" ? "user" : "assistant", content: msg.content
     }));
-    const requestBody = { model: "gpt-5-nano", messages: [...history, { role: "user", content: message }] };
+    const lastHistoryItem = history[history.length - 1];
+    if (lastHistoryItem?.role === "user" && lastHistoryItem.content === message) history.pop();
+    const customInstructions = this.getCustomInstructions();
+    const messages = [...(customInstructions ? [{ role: "system", content: customInstructions }] : []), ...history, { role: "user", content: message }];
+    const requestBody = { model: "gpt-5-nano", messages };
     const response = await fetch('https://api.avalai.ir/v1/chat/completions', {
       method: 'POST', headers: { 'Authorization': `Bearer ${this.AVALAI_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
     });
@@ -2750,6 +2832,9 @@ class AIChatApp {
       .filter(msg => msg.role !== "system")
       .slice(-10)
       .map(msg => ({ role: msg.role === "user" ? "user" : "assistant", content: msg.content }));
+    const lastHistoryItem = history[history.length - 1];
+    if (lastHistoryItem?.role === "user" && lastHistoryItem.content === message) history.pop();
+    const customInstructions = this.getCustomInstructions();
 
     const headers = {
       'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
@@ -2765,7 +2850,7 @@ class AIChatApp {
 
     const requestBody = {
       model: 'gemma-4-e2b-it',
-      messages: [...history, { role: 'user', content: message }],
+      messages: [...(customInstructions ? [{ role: 'system', content: customInstructions }] : []), ...history, { role: 'user', content: message }],
       // Free variants may require permissive data-policy routing.
       // If the account-wide privacy setting is more restrictive, the user must change it in OpenRouter settings.
       provider: { data_collection: 'allow' }
@@ -2797,17 +2882,17 @@ class AIChatApp {
   }
 
   // ---------- Dictionary / Translation ----------
-  async getWordMeaning(word) {
-    if (this.chatProvider === 'avalai') return this.getWordMeaningAvalai(word);
-    if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word);
-    return this.getWordMeaningGemini(word);
+  async getWordMeaning(word, options = {}) {
+    if (this.chatProvider === 'avalai') return this.getWordMeaningAvalai(word, options);
+    if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word, options);
+    return this.getWordMeaningGemini(word, options);
   }
 
-  async getWordMeaningOpenRouter(word) {
+  async getWordMeaningOpenRouter(word, options = {}) {
     const lowerWord = word.toLowerCase().trim();
     try {
       const cachedMeaning = await this.db.get('word_meanings', lowerWord);
-      if (cachedMeaning) return cachedMeaning.value;
+      if (!options.forceRefresh && cachedMeaning) return cachedMeaning.value;
     } catch (err) {
       console.error("Error reading meaning cache:", err);
     }
@@ -2973,9 +3058,9 @@ Be thorough and comprehensive.`;
     }
   }
 
-  async getWordMeaningAvalai(word) {
+  async getWordMeaningAvalai(word, options = {}) {
     const lowerWord = word.toLowerCase().trim();
-    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (cachedMeaning) return cachedMeaning.value; } catch (err) { console.error("Error reading meaning cache:", err); }
+    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (!options.forceRefresh && cachedMeaning) return cachedMeaning.value; } catch (err) { console.error("Error reading meaning cache:", err); }
     if (!this.AVALAI_API_KEY) return { meanings: [{ text: `No Provider 2 API Key`, type: "Error" }], synonyms: [], antonyms: [] };
     
     const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
@@ -3038,9 +3123,9 @@ Be thorough and comprehensive.`;
     }
   }
 
-  async getWordMeaningGemini(word) {
+  async getWordMeaningGemini(word, options = {}) {
     const lowerWord = word.toLowerCase().trim();
-    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (cachedMeaning) { return cachedMeaning.value; } } catch (err) { console.error("Error reading meaning cache:", err); }
+    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (!options.forceRefresh && cachedMeaning) { return cachedMeaning.value; } } catch (err) { console.error("Error reading meaning cache:", err); }
     if (!this.API_KEY) return { meanings: [{ text: `No API Key`, type: "Error" }], synonyms: [], antonyms: [] };
     
     const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
@@ -3103,139 +3188,181 @@ Be thorough and comprehensive.`;
   }
 
   async showWordMeaning(word) {
-    if (!word.trim()) return;
+    word = String(word ?? "").trim();
+    if (!word) return;
 
-    const newPopup = this.wordMeaningPopup.cloneNode(true);
-    newPopup.id = `word-meaning-popup-${Date.now()}`;
-    newPopup.classList.add('hidden'); // Start hidden
-    document.body.appendChild(newPopup);
+    const popup = this.wordMeaningPopup.cloneNode(true);
+    popup.id = "word-meaning-popup-" + Date.now();
+    popup.classList.add("hidden");
+    document.body.appendChild(popup);
 
-    const titleEl = newPopup.querySelector("#word-meaning-title");
-    const meaningsListEl = newPopup.querySelector("#meanings-list");
-    const synonymsListEl = newPopup.querySelector("#synonyms-list");
-    const antonymsListEl = newPopup.querySelector("#antonyms-list");
-    const closeBtn = newPopup.querySelector("#close-word-meaning");
-    const playAudioBtn = newPopup.querySelector("#play-word-audio-btn");
-    const reviewWordBtn = newPopup.querySelector("#review-word-btn");
-    const addToLeitnerBtn = newPopup.querySelector("#add-to-leitner-btn");
-    
+    const titleEl = popup.querySelector("#word-meaning-title");
+    const meaningsEl = popup.querySelector("#meanings-list");
+    const synonymsEl = popup.querySelector("#synonyms-list");
+    const antonymsEl = popup.querySelector("#antonyms-list");
+    const closeBtn = popup.querySelector("#close-word-meaning");
+    const audioBtn = popup.querySelector("#play-word-audio-btn");
+    const reviewBtn = popup.querySelector("#review-word-btn");
+    const addBtn = popup.querySelector("#add-to-leitner-btn");
+    const refreshBtn = popup.querySelector("#refresh-word-meaning-btn");
+    const wordKey = word.toLowerCase().trim();
+    let activeRequest = 0;
+
     titleEl.textContent = word;
-    meaningsListEl.innerHTML = '<div class="meaning-item">Loading...</div>';
-    
-    // Check if word has a due/overdue card in current scope or global
+    meaningsEl.textContent = "Loading meaning…";
+    this.showPopup(popup);
+
     const normalizedWord = this.normalizeWord(word);
     const scope = this.getActiveScope();
     const scopeKey = this.getScopeKey(scope);
-    const cardId = `${scopeKey}:${normalizedWord}`;
-    const globalCardId = `global:all:${normalizedWord}`;
-    
-    // Check both scope-specific and global cards
-    const [card, globalCard] = await Promise.all([
-      this.db.get(this.LEITNER_STORE, cardId),
-      scopeKey !== 'global:all' ? this.db.get(this.LEITNER_STORE, globalCardId) : Promise.resolve(null)
-    ]);
-    
-    // Use scope-specific card if exists, otherwise use global
-    const cardToReview = card || globalCard;
-    
-    if (cardToReview) {
-      const dueState = this.evaluateCardDueState(cardToReview);
-      if (dueState.state === 'due' || dueState.state === 'overdue') {
-        reviewWordBtn.classList.remove('hidden');
-        reviewWordBtn.addEventListener('click', () => {
-          this.hidePopup(newPopup);
-          newPopup.remove();
-          // Start a quick review session for this specific card
-          this.startQuickReview(cardToReview);
-        });
-      }
-    }
-    
-    this.showPopup(newPopup);
-
-    // Close popup when clicking outside the content area
-    newPopup.addEventListener('click', (e) => {
-        if (e.target === newPopup) {
-            this.hidePopup(newPopup);
-            newPopup.remove();
+    const cardId = scopeKey + ":" + normalizedWord;
+    const globalCardId = "global:all:" + normalizedWord;
+    try {
+      const [card, globalCard] = await Promise.all([
+        this.db.get(this.LEITNER_STORE, cardId),
+        scopeKey !== "global:all" ? this.db.get(this.LEITNER_STORE, globalCardId) : Promise.resolve(null)
+      ]);
+      const cardToReview = card || globalCard;
+      if (cardToReview && reviewBtn) {
+        const dueState = this.evaluateCardDueState(cardToReview);
+        if (dueState.state === "due" || dueState.state === "overdue") {
+          reviewBtn.classList.remove("hidden");
+          reviewBtn.addEventListener("click", () => {
+            this.hidePopup(popup);
+            popup.remove();
+            this.startQuickReview(cardToReview);
+          });
         }
-    });
-
-    // Bind events for the new popup
-    closeBtn.addEventListener('click', () => {
-        this.hidePopup(newPopup);
-        newPopup.remove();
-    });
-    
-    playAudioBtn.addEventListener('click', () => this.playTextToSpeech(word, playAudioBtn, null, null));
-    
-    addToLeitnerBtn.addEventListener('click', () => this.addCurrentWordToLeitner(word));
-
-    const playWordItemAudio = (event) => {
-        const button = event.target.closest('.btn-audio-word-item');
-        if (button) {
-            event.stopPropagation();
-            const text = button.dataset.text;
-            if (text) {
-                this.playTextToSpeech(text, button, null, null);
-            }
-        }
-    };
-    synonymsListEl.addEventListener('click', playWordItemAudio);
-    antonymsListEl.addEventListener('click', playWordItemAudio);
-    
-    const handleWordClick = (event) => {
-      if (event.target.classList.contains('clickable-word')) {
-          // Clean the word before showing meaning
-          const rawWord = event.target.textContent.trim();
-          const cleanWord = rawWord.replace(/^[^\w]+|[^\w]+$/g, '').replace(/[^\w\s'-]/g, '').toLowerCase();
-          if (cleanWord) {
-              this.showWordMeaning(cleanWord);
-          }
       }
-    };
-    synonymsListEl.addEventListener('click', handleWordClick);
-    antonymsListEl.addEventListener('click', handleWordClick);
-
-    // Fetch and render data
-    const meaningData = await this.getWordMeaning(word);
-    meaningsListEl.innerHTML = '';
-    if (meaningData.meanings && meaningData.meanings.length > 0 && meaningData.meanings[0].type !== "Error") {
-      meaningData.meanings.forEach(meaning => {
-        const div = document.createElement("div");
-        div.className = "meaning-item";
-        div.innerHTML = `<div class="meaning-text">${meaning.text}</div><span class="meaning-type">${meaning.type}</span>`;
-        meaningsListEl.appendChild(div);
-      });
-    } else {
-      const errorMessage = meaningData.meanings[0]?.text || "Meaning not found";
-      meaningsListEl.innerHTML = `<div class="meaning-item">${errorMessage}</div>`;
+    } catch (error) {
+      console.warn("Could not look up the existing flashcard:", error);
     }
-    const renderWordList = (listElement, wordList, itemClass) => {
-      listElement.innerHTML = '';
-      if (wordList && wordList.length > 0) {
-        wordList.forEach(itemWord => {
-          const container = document.createElement("div");
-          container.className = `${itemClass}-container`;
-          const span = document.createElement("span");
-          span.className = `${itemClass} clickable-word`;
-          span.textContent = itemWord;
-          const button = document.createElement("button");
-          button.className = "btn-icon btn-audio-word-item";
-          button.dataset.text = itemWord;
-          button.title = `Play ${itemWord}`;
-          button.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon></svg>`;
-          container.appendChild(span);
-          container.appendChild(button);
-          listElement.appendChild(container);
+
+    const closePopup = () => {
+      this.hidePopup(popup);
+      popup.remove();
+    };
+    popup.addEventListener("click", event => {
+      if (event.target === popup) closePopup();
+    });
+    closeBtn?.addEventListener("click", closePopup);
+    audioBtn?.addEventListener("click", () => this.playTextToSpeech(word, audioBtn, null, null));
+    addBtn?.addEventListener("click", () => this.addCurrentWordToLeitner(word));
+
+    const handleAudioClick = event => {
+      const button = event.target.closest(".btn-audio-word-item");
+      if (!button) return;
+      event.stopPropagation();
+      if (button.dataset.text) this.playTextToSpeech(button.dataset.text, button, null, null);
+    };
+    synonymsEl.addEventListener("click", handleAudioClick);
+    antonymsEl.addEventListener("click", handleAudioClick);
+
+    const handleWordClick = event => {
+      const wordEl = event.target.closest(".clickable-word");
+      if (!wordEl) return;
+      const clean = wordEl.textContent.trim().replace(/^[^\w]+|[^\w]+$/g, "").replace(/[^\w\s'-]/g, "").toLowerCase();
+      if (clean) this.showWordMeaning(clean);
+    };
+    synonymsEl.addEventListener("click", handleWordClick);
+    antonymsEl.addEventListener("click", handleWordClick);
+
+    const renderMeaningData = data => {
+      meaningsEl.replaceChildren();
+      const meanings = Array.isArray(data?.meanings) ? data.meanings : [];
+      const isError = !meanings.length || /^(error|خطا)$/i.test(String(meanings[0]?.type || ""));
+      if (!isError) {
+        meanings.forEach(item => {
+          const row = document.createElement("div");
+          row.className = "meaning-item";
+          const text = document.createElement("div");
+          text.className = "meaning-text";
+          text.textContent = String(item?.text || "");
+          const type = document.createElement("span");
+          type.className = "meaning-type";
+          type.textContent = String(item?.type || "");
+          row.append(text, type);
+          meaningsEl.appendChild(row);
         });
       } else {
-        listElement.innerHTML = `<span class="${itemClass}-item">${itemClass === 'synonym-item' ? 'No synonyms found' : 'No antonyms found'}</span>`;
+        const message = document.createElement("div");
+        message.className = "meaning-item";
+        message.textContent = String(meanings[0]?.text || "Meaning not found.");
+        meaningsEl.appendChild(message);
+      }
+
+      const renderWordList = (element, words, itemClass, emptyText) => {
+        element.replaceChildren();
+        const items = Array.isArray(words) ? words : [];
+        if (!items.length) {
+          const empty = document.createElement("span");
+          empty.className = itemClass + "-item";
+          empty.textContent = emptyText;
+          element.appendChild(empty);
+          return;
+        }
+        items.forEach(value => {
+          const itemWord = String(value ?? "").trim();
+          if (!itemWord) return;
+          const container = document.createElement("div");
+          container.className = itemClass + "-container";
+          const text = document.createElement("span");
+          text.className = itemClass + " clickable-word";
+          text.textContent = itemWord;
+          const play = document.createElement("button");
+          play.type = "button";
+          play.className = "btn-icon btn-audio-word-item";
+          play.dataset.text = itemWord;
+          play.title = "Play " + itemWord;
+          play.setAttribute("aria-label", "Play " + itemWord);
+          play.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon></svg>';
+          container.append(text, play);
+          element.appendChild(container);
+        });
+      };
+      renderWordList(synonymsEl, data?.synonyms, "synonym-item", "No synonyms found");
+      renderWordList(antonymsEl, data?.antonyms, "antonym-item", "No antonyms found");
+    };
+
+    const fetchAndRender = async forceRefresh => {
+      const requestId = ++activeRequest;
+      if (forceRefresh) {
+        if (refreshBtn) {
+          refreshBtn.disabled = true;
+          refreshBtn.classList.add("is-loading");
+          refreshBtn.setAttribute("aria-busy", "true");
+          refreshBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"></path><path d="M20 12a8 8 0 1 1-2.34-5.66L20 9"></path></svg><span>Regenerating…</span>';
+        }
+        meaningsEl.textContent = "Generating a fresh meaning…";
+        synonymsEl.replaceChildren();
+        antonymsEl.replaceChildren();
+      }
+      try {
+        // Force refresh bypasses provider caches. A successful response overwrites IndexedDB;
+        // if the model fails, keep the last-known-good database entry while showing the error.
+        const result = await this.getWordMeaning(word, { forceRefresh: !!forceRefresh });
+        if (requestId === activeRequest && popup.isConnected) renderMeaningData(result);
+      } catch (error) {
+        console.error("Word meaning fetch failed:", error);
+        if (requestId === activeRequest && popup.isConnected) {
+          meaningsEl.textContent = (forceRefresh ? "Could not regenerate the meaning: " : "Could not load the meaning: ") + (error?.message || String(error));
+          synonymsEl.replaceChildren();
+          antonymsEl.replaceChildren();
+        }
+      } finally {
+        if (requestId === activeRequest && refreshBtn && popup.isConnected) {
+          refreshBtn.disabled = false;
+          refreshBtn.classList.remove("is-loading");
+          refreshBtn.removeAttribute("aria-busy");
+          refreshBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"></path><path d="M20 12a8 8 0 1 1-2.34-5.66L20 9"></path></svg><span>Refresh meaning</span>';
+        }
       }
     };
-    renderWordList(synonymsListEl, meaningData.synonyms, "synonym-item");
-    renderWordList(antonymsListEl, meaningData.antonyms, "antonym-item");
+
+    refreshBtn?.addEventListener("click", () => fetchAndRender(true));
+    await fetchAndRender(false);
   }
+
 
   playLeitnerCardAudio() { if (this.currentCard) { this.playTextToSpeech(this.currentCard.word, this.leitnerPlayAudioBtn, null, null); } }
   playTranslationAudio() { const text = this.originalTextEl.textContent; if (text) { this.playTextToSpeech(text, this.playTranslationAudioBtn, null, null); } }
@@ -3528,7 +3655,8 @@ Be thorough and comprehensive.`;
         interval: 0,
         easeFactor: 2.5,
         lastReviewed: null,
-        status: 'new'
+        status: 'new',
+        fsrs: this.normalizeFSRSState({}, null, 0, 0)
       };
 
       await this.db.set(this.LEITNER_STORE, newCard);
@@ -3543,87 +3671,57 @@ Be thorough and comprehensive.`;
 
   async openLeitnerModal(chatId = null, scopeOverride = null) {
     this.leitnerModal.classList.remove("hidden");
-    this.leitnerCardContainer.classList.remove('hidden');
-    this.leitnerFinishedScreen.classList.add('hidden');
+    this.leitnerCardContainer.classList.remove("hidden");
+    this.leitnerFinishedScreen.classList.add("hidden");
     const scope = scopeOverride || (chatId ? this.getChatScope(chatId) : this.getActiveScope());
     const scopeKey = this.getScopeKey(scope);
-    const includeGlobal = scopeKey !== 'global:all';
+    const includeGlobal = scopeKey !== "global:all";
     this.currentLeitnerScope = scope;
-    
+
     try {
       const allCards = await this.db.getAll(this.LEITNER_STORE);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      
-      let cardsToReview = allCards.filter(card => {
-        // Validate card structure
+      const now = new Date();
+      const todayStart = this.getMidnightLocal(now);
+      const cardsToReview = allCards.filter(card => {
         if (!card || !card.scopeKey || !card.word || !card.id) {
-          console.warn('Invalid card found:', card);
+          console.warn("Invalid card found:", card);
           return false;
         }
-        
-        // Filter by scope
-        if (card.scopeKey !== scopeKey) {
-          if (!includeGlobal) return false;
-          if (card.scopeKey !== 'global:all') return false;
-        }
-        
+        if (card.scopeKey !== scopeKey && (!includeGlobal || card.scopeKey !== "global:all")) return false;
         const dueIso = this.coerceIsoDate(card.dueDate, card.createdAt);
-        const dueDate = this.getMidnightLocal(dueIso);
-        if (!dueDate) return false;
-        return dueDate.getTime() <= today.getTime();
+        const dueDate = dueIso ? new Date(dueIso) : null;
+        return !!dueDate && !Number.isNaN(dueDate.getTime()) && dueDate.getTime() <= now.getTime();
       });
-      
-      // Sort cards by priority: overdue (oldest first) -> new -> regular due
+
       cardsToReview.sort((a, b) => {
-        const aDueIso = this.coerceIsoDate(a.dueDate, a.createdAt);
-        const bDueIso = this.coerceIsoDate(b.dueDate, b.createdAt);
-        const aDue = this.getMidnightLocal(aDueIso) || today;
-        const bDue = this.getMidnightLocal(bDueIso) || today;
-        
-        const aIsNew = (a.repetitions || 0) === 0;
-        const bIsNew = (b.repetitions || 0) === 0;
-
-        const aIsOverdue = !aIsNew && aDue.getTime() < today.getTime();
-        const bIsOverdue = !bIsNew && bDue.getTime() < today.getTime();
-
-        // Overdue review cards first
-        if (aIsOverdue && !bIsOverdue) return -1;
-        if (!aIsOverdue && bIsOverdue) return 1;
-        if (aIsOverdue && bIsOverdue) return aDue - bDue;
-        
-        // Both new - random order
-        if (aIsNew && bIsNew) return Math.random() - 0.5;
-        
-        // One is new, one is review - new cards next
-        if (aIsNew) return -1;
-        if (bIsNew) return 1;
-        
-        // Both are review cards - sort by due date (oldest first)
-        return aDue - bDue;
+        const aIso = this.coerceIsoDate(a.dueDate, a.createdAt);
+        const bIso = this.coerceIsoDate(b.dueDate, b.createdAt);
+        const aDue = aIso ? new Date(aIso) : now;
+        const bDue = bIso ? new Date(bIso) : now;
+        const aNew = this.isNewFSRSCard(a);
+        const bNew = this.isNewFSRSCard(b);
+        const aOverdue = !aNew && !!todayStart && aDue.getTime() < todayStart.getTime();
+        const bOverdue = !bNew && !!todayStart && bDue.getTime() < todayStart.getTime();
+        if (aOverdue !== bOverdue) return aOverdue ? -1 : 1;
+        if (aOverdue && bOverdue) return aDue.getTime() - bDue.getTime();
+        if (aNew !== bNew) return aNew ? -1 : 1;
+        return aDue.getTime() - bDue.getTime();
       });
-      
+
       this.leitnerQueue = cardsToReview;
-      
-      // Calculate stats
-      const newCount = this.leitnerQueue.filter(c => (c.repetitions || 0) === 0).length;
-      const reviewCount = this.leitnerQueue.filter(c => (c.repetitions || 0) > 0).length;
-      const totalCount = this.leitnerQueue.length;
-      
-      this.leitnerStatsNew.textContent = `New: ${newCount}`;
-      this.leitnerStatsDue.textContent = `Review: ${reviewCount} | Total: ${totalCount}`;
-      
-      if (this.leitnerQueue.length > 0) {
-        this.showNextCard();
-      } else {
-        this.showFinishedScreen();
-      }
+      const newCount = cardsToReview.filter(card => this.isNewFSRSCard(card)).length;
+      const reviewCount = cardsToReview.length - newCount;
+      this.leitnerStatsNew.textContent = "New: " + newCount;
+      this.leitnerStatsDue.textContent = "Review: " + reviewCount + " | Total: " + cardsToReview.length;
+      if (this.leitnerQueue.length > 0) this.showNextCard();
+      else this.showFinishedScreen();
     } catch (error) {
-      console.error("Error starting Leitner review:", error);
+      console.error("Error starting FSRS-6 review:", error);
       this.cardFrontText.textContent = "Error loading cards.";
+      this.showToast("Could not load flashcards for review.", "error");
     }
   }
-  
+
   // Quick review for a single card
   async startQuickReview(card) {
     this.leitnerModal.classList.remove("hidden");
@@ -3651,8 +3749,8 @@ Be thorough and comprehensive.`;
     
     // Update remaining count in stats
     const remaining = this.leitnerQueue.length;
-    const newCount = this.leitnerQueue.filter(c => (c.repetitions || 0) === 0).length;
-    const reviewCount = this.leitnerQueue.filter(c => (c.repetitions || 0) > 0).length;
+    const newCount = this.leitnerQueue.filter(c => this.isNewFSRSCard(c)).length;
+    const reviewCount = this.leitnerQueue.length - newCount;
     
     this.leitnerStatsNew.textContent = `New: ${newCount}`;
     this.leitnerStatsDue.textContent = `Review: ${reviewCount} | Remaining: ${remaining}`;
@@ -3704,100 +3802,103 @@ Be thorough and comprehensive.`;
     }
   }
   
-  // SM-2 Algorithm Implementation (Standard Spaced Repetition)
-  calculateSM2(card, quality) {
-    /*
-     * Anki SM-2 Algorithm with Learning Steps
-     * quality: 0-5 where:
-     *   0: Again (Complete blackout)
-     *   2: Hard (Correct with hesitation)  
-     *   3: Good (Correct response)
-     *   5: Easy (Perfect recall)
-     */
-    
-    let { repetitions, interval, easeFactor } = card;
-    
-    // Ensure defaults
-    repetitions = repetitions || 0;
-    interval = interval || 0;
-    easeFactor = easeFactor || 2.5;
-    
-    let newRepetitions;
-    let newInterval;
-    let newEaseFactor;
-    
-    // Again button (quality=0) - Failed card
-    if (quality === 0) {
-      // Failed card - reset to learning
-      newRepetitions = 0;
-      // Again button shows card in same session for new cards, tomorrow for review cards
-      if (repetitions === 0) {
-        newInterval = 0; // Show again soon in same session
-      } else {
-        newInterval = 1; // Review tomorrow for lapsed cards
-      }
-      newEaseFactor = Math.max(1.3, easeFactor - 0.2); // Decrease ease factor
+  // FSRS-6, using the published 21 default parameters (desired retention: 0.90).
+  calculateFSRS(card, rating, reviewTime = new Date()) {
+    const w = [0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001, 1.8722, 0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425, 0.0912, 0.0658, 0.1542];
+    const clamp = (x, min, max) => Math.min(max, Math.max(min, x));
+    const grade = clamp(Math.round(Number(rating) || 1), 1, 4);
+    const state = this.normalizeFSRSState(card, card?.lastReviewed, card?.repetitions || 0, card?.interval || 0);
+    const lastReview = state.lastReview ? new Date(state.lastReview) : null;
+    const elapsedDays = lastReview && !Number.isNaN(lastReview.getTime())
+      ? Math.max(0, (reviewTime.getTime() - lastReview.getTime()) / 86400000)
+      : 0;
+    // FSRS-6 uses elapsed whole days, rounded to the nearest day, for recall estimates.
+    const elapsedWholeDays = Math.round(elapsedDays);
+    const isNew = state.state === "new" || !(state.stability > 0) || !lastReview || Number.isNaN(lastReview.getTime());
+    const S = Math.max(0.1, state.stability || 0.1);
+    const D = clamp(state.difficulty || 5, 1, 10);
+    const decay = w[20];
+    const factor = Math.pow(0.9, -1 / decay) - 1;
+    const retrievability = isNew ? 1 : Math.pow(1 + factor * elapsedWholeDays / S, -decay);
+
+    const initialDifficulty = G => clamp(w[4] - Math.exp(w[5] * (G - 1)) + 1, 1, 10);
+    let nextDifficulty = initialDifficulty(grade);
+    if (!isNew) {
+      const dampedDifficulty = D + (-w[6] * (grade - 3)) * ((10 - D) / 9);
+      nextDifficulty = clamp(w[7] * initialDifficulty(4) + (1 - w[7]) * dampedDifficulty, 1, 10);
+    }
+
+    let nextStability;
+    if (isNew) {
+      nextStability = w[grade - 1];
+    } else if (elapsedWholeDays === 0) {
+      const sameDayIncrement = Math.exp(w[17] * (grade - 3 + w[18])) * Math.pow(S, -w[19]);
+      const candidate = S * sameDayIncrement;
+      nextStability = grade >= 2 ? Math.max(candidate, S) : candidate;
+    } else if (grade === 1) {
+      const postLapse = w[11] * Math.pow(D, -w[12]) * (Math.pow(S + 1, w[13]) - 1) * Math.exp((1 - retrievability) * w[14]);
+      const minimumPostLapse = S / Math.exp(w[17] * w[18]);
+      nextStability = Math.min(postLapse, minimumPostLapse);
     } else {
-      // Passed card (Hard, Good, or Easy)
-      // Calculate new ease factor: EF' = EF + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
-      newEaseFactor = Math.max(1.3, easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)));
-      
-      if (repetitions === 0) {
-        // First successful review (Learning -> Graduated)
-        if (quality === 5) {
-          // Easy button on new card - graduate immediately with longer interval
-          newInterval = 4; // Anki default: 4 days for easy on new cards
-          newRepetitions = 2; // Skip learning phase entirely
-        } else if (quality === 2) {
-          // Hard button on new card - graduate but with shorter interval
-          newInterval = 1;
-          newRepetitions = 1; // Graduate to review stage
-        } else {
-          // Good button on new card - graduate to review
-          newInterval = 1; // Graduate with 1 day interval
-          newRepetitions = 1;
-        }
-      } else if (repetitions === 1) {
-        // Second successful review (first review after graduating)
-        if (quality === 5) {
-          // Easy button - bonus multiplier
-          newInterval = Math.round(interval * newEaseFactor * 1.3);
-        } else if (quality === 2) {
-          // Hard button - slightly longer than current
-          newInterval = Math.max(2, Math.round(interval * 1.2)); // At least 2 days
-        } else {
-          // Good button
-          newInterval = 6; // Anki default graduating interval (2nd review)
-        }
-        newRepetitions = 2;
-      } else {
-        // Mature card (repetitions >= 2)
-        if (quality === 5) {
-          // Easy button - bonus multiplier
-          newInterval = Math.round(interval * newEaseFactor * 1.3);
-        } else if (quality === 2) {
-          // Hard button - multiply by 1.2
-          newInterval = Math.max(Math.round(interval * 1.2), interval + 1);
-        } else {
-          // Good button - normal interval
-          newInterval = Math.round(interval * newEaseFactor);
-        }
-        newRepetitions = repetitions + 1;
-      }
+      const hardPenalty = grade === 2 ? w[15] : 1;
+      const easyBonus = grade === 4 ? w[16] : 1;
+      nextStability = S * (1 + Math.exp(w[8]) * (11 - D) * Math.pow(S, -w[9]) * (Math.exp((1 - retrievability) * w[10]) - 1) * hardPenalty * easyBonus);
     }
-    
-    // Ensure interval is never 0 except for same-session reviews (Again button)
-    if (newInterval === 0 && quality > 0) {
-      newInterval = 1;
-    }
-    
+    nextStability = clamp(Number.isFinite(nextStability) ? nextStability : 0.1, 0.1, 36500);
+
+    const desiredRetention = 0.9;
+    let intervalDays = Math.round((nextStability / factor) * (Math.pow(desiredRetention, -1 / decay) - 1));
+    intervalDays = clamp(Number.isFinite(intervalDays) ? intervalDays : 1, 1, 36500);
+    const isAgain = grade === 1;
+    if (isAgain) intervalDays = 0; // App-level short learning step; stability remains governed by FSRS-6.
+
+    const reviewedAt = reviewTime.toISOString();
+    const nextState = isAgain ? (isNew ? "learning" : "relearning") : "review";
+    const reps = state.reps + 1;
+    const lapses = state.lapses + (isAgain && state.state === "review" ? 1 : 0);
+    const logEntry = {
+      rating: grade,
+      reviewedAt,
+      elapsedDays: Number(elapsedDays.toFixed(4)),
+      scheduledDays: intervalDays,
+      stability: Number(nextStability.toFixed(4)),
+      difficulty: Number(nextDifficulty.toFixed(4)),
+      retrievability: Number(retrievability.toFixed(4)),
+      stateBefore: state.state,
+      stateAfter: nextState
+    };
+    const fsrs = {
+      version: 6,
+      stability: nextStability,
+      difficulty: nextDifficulty,
+      state: nextState,
+      reps,
+      lapses,
+      lastReview: reviewedAt,
+      scheduledDays: intervalDays,
+      elapsedDays,
+      retrievability,
+      desiredRetention,
+      reviewLog: [...(state.reviewLog || []), logEntry].slice(-50)
+    };
     return {
-      repetitions: newRepetitions,
-      interval: newInterval,
-      easeFactor: newEaseFactor
+      fsrs,
+      repetitions: reps,
+      interval: intervalDays,
+      easeFactor: clamp(2.5 - ((nextDifficulty - 1) / 9) * 1.2, 1.3, 2.5),
+      dueMinutes: isAgain ? 10 : 0,
+      retrievability,
+      stability: nextStability,
+      difficulty: nextDifficulty
     };
   }
-  
+
+  // Compatibility wrapper for imports or older code that still calls this name.
+  calculateSM2(card, quality) {
+    const grade = quality === 0 ? 1 : quality === 2 ? 2 : quality === 5 ? 4 : 3;
+    return this.calculateFSRS(card, grade);
+  }
+
   formatInterval(days) {
     if (!days || days < 1) return `<1d`;
     if (days === 1) return `1 day`;
@@ -3811,82 +3912,59 @@ Be thorough and comprehensive.`;
   
   updateRatingButtons() {
     if (!this.currentCard) return;
-    
-    const card = this.currentCard;
-    
-    // Calculate what would happen with each rating
-    const againResult = this.calculateSM2(card, 0);
-    const hardResult = this.calculateSM2(card, 2);
-    const goodResult = this.calculateSM2(card, 3);
-    const easyResult = this.calculateSM2(card, 5);
-    
-    // Update button labels with intervals and keyboard shortcuts
-    this.ratingAgainBtn.innerHTML = `Again<br><small>${this.formatInterval(againResult.interval)} (1)</small>`;
-    this.ratingHardBtn.innerHTML = `Hard<br><small>${this.formatInterval(hardResult.interval)} (2)</small>`;
-    this.ratingGoodBtn.innerHTML = `Good<br><small>${this.formatInterval(goodResult.interval)} (3)</small>`;
-    this.ratingEasyBtn.innerHTML = `Easy<br><small>${this.formatInterval(easyResult.interval)} (4)</small>`;
+    const again = this.calculateFSRS(this.currentCard, 1);
+    const hard = this.calculateFSRS(this.currentCard, 2);
+    const good = this.calculateFSRS(this.currentCard, 3);
+    const easy = this.calculateFSRS(this.currentCard, 4);
+    const intervalLabel = result => result.dueMinutes ? "10 min" : this.formatInterval(result.interval);
+    this.ratingAgainBtn.innerHTML = "Again<br><small>" + intervalLabel(again) + " (1)</small>";
+    this.ratingHardBtn.innerHTML = "Hard<br><small>" + intervalLabel(hard) + " (2)</small>";
+    this.ratingGoodBtn.innerHTML = "Good<br><small>" + intervalLabel(good) + " (3)</small>";
+    this.ratingEasyBtn.innerHTML = "Easy<br><small>" + intervalLabel(easy) + " (4)</small>";
   }
 
   async rateCard(rating) {
-    if (!this.currentCard) return;
-    
-    // Map our 4 buttons to SM-2 quality scores (0-5)
-    const qualityMap = {
-      1: 0, // Again = Complete failure
-      2: 2, // Hard = Incorrect but remembered
-      3: 3, // Good = Correct with difficulty
-      4: 5  // Easy = Perfect recall
-    };
-    
-    const quality = qualityMap[rating];
-    const sm2Result = this.calculateSM2(this.currentCard, quality);
-    
-    // Calculate next due date
-    const nextDueDate = new Date();
-    nextDueDate.setHours(0, 0, 0, 0); // Set to midnight today
-    
-    // Add interval days - if interval is 0, keep it today for same-session review
-    if (sm2Result.interval > 0) {
-      nextDueDate.setDate(nextDueDate.getDate() + sm2Result.interval);
+    if (!this.currentCard || this.isRatingCard) return;
+    this.isRatingCard = true;
+    const ratingButtons = [this.ratingAgainBtn, this.ratingHardBtn, this.ratingGoodBtn, this.ratingEasyBtn].filter(Boolean);
+    ratingButtons.forEach(button => { button.disabled = true; });
+
+    try {
+      const normalizedRating = Math.min(4, Math.max(1, Math.round(Number(rating) || 1)));
+      const reviewedAt = new Date();
+      const result = this.calculateFSRS(this.currentCard, normalizedRating, reviewedAt);
+      const dueDate = new Date(reviewedAt.getTime());
+      if (result.dueMinutes) {
+        dueDate.setTime(reviewedAt.getTime() + result.dueMinutes * 60000);
+      } else {
+        dueDate.setHours(0, 0, 0, 0);
+        dueDate.setDate(dueDate.getDate() + result.interval);
+      }
+      const updatedCard = {
+        ...this.currentCard,
+        repetitions: result.repetitions,
+        interval: result.interval,
+        easeFactor: result.easeFactor,
+        dueDate: dueDate.toISOString(),
+        lastReviewed: reviewedAt.toISOString(),
+        status: result.fsrs.state,
+        fsrs: result.fsrs
+      };
+
+      await this.db.set(this.LEITNER_STORE, updatedCard);
+      await this.refreshLeitnerDueCacheForWord(updatedCard.word, this.currentLeitnerScope);
+      // Again is due in ten minutes; do not put it back into this queue immediately.
+      this.showNextCard();
+    } catch (error) {
+      console.error("Failed to save FSRS-6 review:", error);
+      this.showToast("The review could not be saved. Your card is still available to retry.", "error");
+    } finally {
+      this.isRatingCard = false;
+      ratingButtons.forEach(button => { button.disabled = false; });
     }
-    
-    // Determine status
-    let status;
-    if (sm2Result.repetitions === 0) {
-      status = 'learning'; // New cards or lapsed cards
-    } else {
-      status = 'review'; // Graduated cards (rep >= 1)
-    }
-    
-    // Update card in database
-    const updatedCard = {
-      ...this.currentCard,
-      repetitions: sm2Result.repetitions,
-      interval: sm2Result.interval,
-      easeFactor: sm2Result.easeFactor,
-      dueDate: nextDueDate.toISOString(),
-      lastReviewed: new Date().toISOString(),
-      status: status
-    };
-    
-    await this.db.set(this.LEITNER_STORE, updatedCard);
-    
-    // Update cache for this word
-    await this.refreshLeitnerDueCacheForWord(this.currentCard.word, this.currentLeitnerScope);
-    
-    // If interval is 0 (Again button), re-add card to queue for same-session review
-    if (sm2Result.interval === 0) {
-      // Add to end of queue after 3-5 random cards (if available)
-      const insertPosition = Math.min(
-        this.leitnerQueue.length,
-        Math.floor(Math.random() * 3) + 3
-      );
-      this.leitnerQueue.splice(insertPosition, 0, updatedCard);
-    }
-    
-    this.showNextCard();
   }
-  
+
+
   // --- Import/Export ---
   showImportTextModal() { this.importTextModal.classList.remove("hidden"); }
   hideImportTextModal() { this.importTextModal.classList.add("hidden"); }
@@ -4131,7 +4209,8 @@ Be thorough and comprehensive.`;
           avalai_api_key: this.AVALAI_API_KEY || '',
           openrouter_api_key: this.OPENROUTER_API_KEY || '',
           elevenlabs_api_key: this.ELEVENLABS_API_KEY || '',
-          elevenlabs_voice_id: this.ELEVENLABS_VOICE_ID || ''
+          elevenlabs_voice_id: this.ELEVENLABS_VOICE_ID || '',
+          custom_instructions: this.getCustomInstructions()
         },
         indexedDB: {
           word_meanings: wordMeanings || [],
@@ -4306,6 +4385,11 @@ Be thorough and comprehensive.`;
           this.ELEVENLABS_VOICE_ID = localData.elevenlabs_voice_id;
           localStorage.setItem('elevenlabs_voice_id', this.ELEVENLABS_VOICE_ID || '');
           if (this.elevenLabsVoiceIdInput) this.elevenLabsVoiceIdInput.value = this.ELEVENLABS_VOICE_ID;
+        }
+        if (typeof localData.custom_instructions === 'string') {
+          this.customInstructions = localData.custom_instructions;
+          localStorage.setItem('custom_instructions', this.customInstructions);
+          if (this.customInstructionsInput) this.customInstructionsInput.value = this.customInstructions;
         }
 
         // Import word meanings
