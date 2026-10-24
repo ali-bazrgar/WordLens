@@ -1320,7 +1320,7 @@
         const Context=window.AudioContext||window.webkitAudioContext;if(!Context)throw new Error('Web Audio is not supported by this browser.');
         audioContext=new Context();await audioContext.resume();const analyser=audioContext.createAnalyser();analyser.fftSize=2048;analyser.smoothingTimeConstant=0.15;
         const source=audioContext.createMediaStreamSource(stream);source.connect(analyser);
-        const session={active:true,stream,audioContext,analyser,source,frameId:0,recorder:null,chunks:[],state:'listening',noiseFloor:0.002,threshold:0.012,speechStartedAt:0,lastVoiceAt:0,audio:null,audioStop:null,turnController:null,turnSequence:0,bargeCandidateAt:0,bargeCandidateLastVoiceAt:0,bargeResumeState:'',discardRecorder:null};
+        const session={active:true,stream,audioContext,analyser,source,frameId:0,recorder:null,chunks:[],state:'listening',noiseFloor:0.002,threshold:0.012,speechStartedAt:0,lastVoiceAt:0,audio:null,audioStop:null,turnController:null,turnSequence:0,bargeCandidateAt:0,bargeCandidateLastVoiceAt:0,bargeResumeState:'',bargeCandidatePromise:null,resolveBargeCandidate:null,discardRecorder:null};
         this.realtimeSession=session;
         if(this.realtimeBtn){this.realtimeBtn.disabled=false;this.realtimeBtn.classList.add('active');this.realtimeBtn.setAttribute('aria-pressed','true');this.realtimeBtn.title='Stop live conversation';this.realtimeBtn.setAttribute('aria-label','Stop live conversation');}
         if(this.voiceBtn)this.voiceBtn.disabled=true;realtimeSetStatus(this,'Listening — speak naturally, then pause briefly when you finish a turn.','listening');this.tickRealtimeConversation(session);
@@ -1330,6 +1330,7 @@
     };
     AIChatApp.prototype.stopRealtimeConversation=function(){
       const session=this.realtimeSession;if(!session)return;session.active=false;if(session.frameId)cancelAnimationFrame(session.frameId);
+      if(session.resolveBargeCandidate){const resolveCandidate=session.resolveBargeCandidate;session.resolveBargeCandidate=null;session.bargeCandidatePromise=null;resolveCandidate(true);}
       if(session.turnController&&!session.turnController.signal.aborted)session.turnController.abort();
       if(session.recorder&&session.recorder.state!=='inactive'){try{session.recorder.stop();}catch(_){}}
       if(session.audio){try{session.audio.pause();session.audio.currentTime=0;}catch(_){}if(session.audioStop)session.audioStop();}
@@ -1354,6 +1355,7 @@
                 session.bargeCandidateAt=now;
                 session.bargeCandidateLastVoiceAt=now;
                 beginRealtimeSegmentRecorder(this,session,now);
+                session.bargeCandidatePromise=new Promise(resolve=>{session.resolveBargeCandidate=resolve;});
                 session.state='barge-candidate';
                 realtimeSetStatus(this,'Listening for an interruption…','processing');
               }catch(error){
@@ -1372,6 +1374,9 @@
             session.bargeCandidateAt=0;
             if(session.turnController&&!session.turnController.signal.aborted)session.turnController.abort();
             if(session.audioStop)session.audioStop();
+            const resolveCandidate=session.resolveBargeCandidate;
+            session.resolveBargeCandidate=null;session.bargeCandidatePromise=null;
+            if(resolveCandidate)resolveCandidate(true);
             realtimeSetStatus(this,'Interrupted — recording your turn…','recording');
           }else if(voiceGap>180){
             const recorder=session.recorder;
@@ -1384,6 +1389,9 @@
             session.state=session.bargeResumeState||'listening';
             session.bargeCandidateAt=0;
             session.bargeCandidateLastVoiceAt=0;
+            const resolveCandidate=session.resolveBargeCandidate;
+            session.resolveBargeCandidate=null;session.bargeCandidatePromise=null;
+            if(resolveCandidate)resolveCandidate(false);
             if(session.state==='speaking')realtimeSetStatus(this,'Speaking… talk to interrupt.','speaking');
             else realtimeSetStatus(this,session.state==='thinking'?'Thinking…':'Preparing speech…','processing');
           }
@@ -1448,6 +1456,7 @@
         const answer=this.chatProvider==='openrouter'
           ? await this.callOpenRouterChatAPI(transcript,{signal:controller.signal,stream:true})
           : await this.callChatAPI(transcript);
+        if(session.state==='barge-candidate'&&session.bargeCandidatePromise)await session.bargeCandidatePromise;
         if(!session.active||this.realtimeSession!==session||controller.signal.aborted||['barge-candidate','recording'].includes(session.state)){
           loadingWrapper.remove();
           return;
@@ -1459,6 +1468,7 @@
           session.state='synthesizing';
           realtimeSetStatus(this,'Preparing speech…','processing');
           const audioBlob=await localTTS(answer,{signal:controller.signal});
+          if(session.state==='barge-candidate'&&session.bargeCandidatePromise)await session.bargeCandidatePromise;
           if(!session.active||this.realtimeSession!==session||controller.signal.aborted||['barge-candidate','recording'].includes(session.state))return;
           session.state='speaking';
           realtimeSetStatus(this,'Speaking — talk to interrupt.','speaking');
