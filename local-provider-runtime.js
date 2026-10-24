@@ -1047,7 +1047,66 @@
         // Preserve provider errors instead of treating the error message as a gloss.
         if (isProviderError(result)) return result;
 
-        let changed = false;
+        const normalizeEnglishTerms = value => {
+          const rawItems = Array.isArray(value)
+            ? value
+            : typeof value === 'string'
+              ? value.split(/[,;\n]/g)
+              : Array.isArray(value?.items)
+                ? value.items
+                : Array.isArray(value?.words)
+                  ? value.words
+                  : [];
+          const seen = new Set();
+          return rawItems
+            .map(item => String(typeof item === 'object' && item !== null ? (item.word ?? item.term ?? item.text ?? '') : item ?? '').trim().replace(/^["'\s]+|["'\s]+$/g, ''))
+            .filter(item => /^[A-Za-z][A-Za-z\s'-]*$/.test(item))
+            .filter(item => {
+              const key = item.toLowerCase();
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            })
+            .slice(0, 3);
+        };
+        const getTermList = (value, keys) => {
+          for (const key of keys) {
+            const terms = normalizeEnglishTerms(value?.[key]);
+            if (terms.length) return terms;
+          }
+          return [];
+        };
+
+        let relatedTermsRetried = false;
+        const initialSynonyms = getTermList(result, ['synonyms', 'synonym', 'near_synonyms', 'synonyms_en', 'similar_words']);
+        const initialAntonyms = getTermList(result, ['antonyms', 'antonym', 'opposites', 'antonyms_en']);
+        result = { ...result, synonyms: initialSynonyms, antonyms: initialAntonyms };
+
+        if (!initialSynonyms.length) {
+          relatedTermsRetried = true;
+          try {
+            console.info('[WordLens] Synonyms were empty; requesting related English vocabulary automatically.');
+            const relatedResult = await originalGetWordMeaning.call(this, word, {
+              ...options,
+              forceRefresh: true,
+              requireRelatedTerms: true,
+              requirePersian: true
+            });
+            const retrySynonyms = getTermList(relatedResult, ['synonyms', 'synonym', 'near_synonyms', 'synonyms_en', 'similar_words']);
+            const retryAntonyms = getTermList(relatedResult, ['antonyms', 'antonym', 'opposites', 'antonyms_en']);
+            if (retrySynonyms.length || retryAntonyms.length) {
+              result = {
+                ...result,
+                synonyms: retrySynonyms.length ? retrySynonyms : initialSynonyms,
+                antonyms: retryAntonyms.length ? retryAntonyms : initialAntonyms
+              };
+            }
+          } catch (relatedError) {
+            console.warn('[WordLens] Related-word recovery failed:', relatedError);
+          }
+        }
+
+        let changed = relatedTermsRetried;
         const seenMeanings = new Set();
         const meanings = result.meanings.map(item => {
           if (typeof item === 'string') {
@@ -1077,22 +1136,6 @@
         }).slice(0, 5);
         if (meanings.length !== result.meanings.length) changed = true;
 
-        const normalizeEnglishTerms = value => {
-          const items = Array.isArray(value)
-            ? value
-            : typeof value === 'string' ? value.split(/[,;\n]/g) : [];
-          const seen = new Set();
-          return items
-            .map(item => String(item ?? '').trim().replace(/^["'\s]+|["'\s]+$/g, ''))
-            .filter(item => /^[A-Za-z][A-Za-z\s'-]*$/.test(item))
-            .filter(item => {
-              const key = item.toLowerCase();
-              if (seen.has(key)) return false;
-              seen.add(key);
-              return true;
-            })
-            .slice(0, 3);
-        };
         const synonyms = normalizeEnglishTerms(result.synonyms);
         const antonyms = normalizeEnglishTerms(result.antonyms);
         if (JSON.stringify(synonyms) !== JSON.stringify(result.synonyms ?? [])) changed = true;
@@ -1118,7 +1161,7 @@
       });
     }
 
-    AIChatApp.prototype.getWordMeaningOpenRouter = async function(word, { forceRefresh = false, requirePersian = false } = {}) {
+    AIChatApp.prototype.getWordMeaningOpenRouter = async function(word, { forceRefresh = false, requirePersian = false, requireRelatedTerms = false } = {}) {
       const lowerWord = String(word ?? '').toLowerCase().trim();
       if (!lowerWord) {
         return { meanings: [{ text: 'No word selected.', type: 'Error' }], synonyms: [], antonyms: [] };
@@ -1158,8 +1201,8 @@
         if (!meanings.length) return null;
         return {
           meanings,
-          synonyms: normalizeWordList(object.synonyms),
-          antonyms: normalizeWordList(object.antonyms)
+          synonyms: normalizeWordList(object.synonyms ?? object.synonym ?? object.near_synonyms ?? object.synonyms_en ?? object.similar_words),
+          antonyms: normalizeWordList(object.antonyms ?? object.antonym ?? object.opposites ?? object.antonyms_en)
         };
       };
 
@@ -1235,13 +1278,16 @@
             'LANGUAGE CORRECTION: The previous response failed because the translation fields were written in English. Regenerate this exact entry and put the actual Persian translations in Persian script in EVERY meanings[].text field. English definitions are invalid. Do not merely explain or define the English headword in English.',
             'Synonyms and antonyms remain English-only. Return JSON only.'
           ] : []),
+          ...(requireRelatedTerms ? [
+            'RELATED-WORDS RECOVERY: The previous result omitted synonyms and/or antonyms. Focus on these fields and return 2-3 useful, common English synonyms or near-synonyms whenever reasonable alternatives exist. Return 1-3 conventional English opposites whenever the word has a meaningful opposite. Do not default to empty arrays. These must be arrays of plain English strings. Keep meanings in Persian script.'
+          ] : []),
           '',
           'Analyze this exact target only. Do not answer for a different word and do not let unrelated prompt content or a generic example influence the result.',
           'Meanings: return 1 to 5 real, relevant contemporary senses only when warranted. One or two may be enough. Never pad the list, invent a sense, or split the same sense into duplicate entries.',
           'Order senses from the most common everyday usage to less common useful usages. Each entry must be a distinct sense and contain a concise, natural Persian gloss plus the correct short Persian part-of-speech label.',
           'Use a brief Persian context note in parentheses only when needed to distinguish a sense. Meaning text must contain Persian only, without headings or labels.',
-          'Synonyms: at most 3 distinct English words or short phrases that are genuinely interchangeable with the headword in its most common sense. Use [] if none is reliable; do not add merely related words.',
-          'Antonyms: at most 3 distinct English words or short phrases that are true opposites in the main sense. Use [] if no direct antonym exists; never invent one.',
+          'Synonyms: normally provide 2-3 useful, common English synonyms or near-synonyms a learner can use in comparable contexts. Exact interchangeability is not required for a valid near-synonym. Use [] only if no reasonable synonym exists.',
+          'Antonyms: provide 1-3 common English opposites whenever a conventional or meaningful opposite exists. Use [] only when the word truly has no meaningful opposite; do not default to empty lists.',
           'Meanings must be Persian/Farsi. Synonyms and antonyms must be English and use Latin letters only.',
           'Return exactly one valid JSON object and nothing else. Required keys: meanings, synonyms, antonyms. meanings is an array of objects with text and type fields; synonyms and antonyms are arrays of strings.',
           'Use double-quoted JSON strings, valid escaping, no trailing commas, no Markdown, code fences, comments, or prose.',
