@@ -3949,8 +3949,9 @@ Be thorough and comprehensive.`;
         const aIsNew = (a.repetitions || 0) === 0;
         const bIsNew = (b.repetitions || 0) === 0;
 
-        const aIsOverdue = !aIsNew && aDue.getTime() < today.getTime();
-        const bIsOverdue = !bIsNew && bDue.getTime() < today.getTime();
+        const nowForSort = Date.now();
+        const aIsOverdue = !aIsNew && aDue.getTime() < nowForSort;
+        const bIsOverdue = !bIsNew && bDue.getTime() < nowForSort;
 
         // Overdue review cards first
         if (aIsOverdue && !bIsOverdue) return -1;
