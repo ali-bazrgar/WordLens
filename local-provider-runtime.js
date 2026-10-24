@@ -1131,32 +1131,29 @@
   };
   const beginRealtimeSegmentRecorder = (app, session, now) => {
     const recorder = makeRealtimeRecorder(session.stream);
+    const capturedChunks = [];
+    recorder.wordLensDiscarded = false;
     session.recorder = recorder;
-    session.chunks = [];
+    session.chunks = capturedChunks;
     session.speechStartedAt = now;
     session.lastVoiceAt = now;
     session.discardRecorder = null;
     recorder.ondataavailable = event => {
-      if (event.data?.size && session.recorder === recorder && session.discardRecorder !== recorder) session.chunks.push(event.data);
+      if (event.data?.size && !recorder.wordLensDiscarded) capturedChunks.push(event.data);
     };
     recorder.onerror = event => {
       console.error('Realtime recorder error:', event.error || event);
       realtimeSetStatus(app, 'Microphone capture error. Stop and restart if it continues.', 'error');
     };
     recorder.onstop = () => {
-      const discarded = session.discardRecorder === recorder;
-      const chunks = discarded ? [] : session.chunks.slice();
-      session.chunks = [];
-      if (session.recorder === recorder) session.recorder = null;
-      if (session.discardRecorder === recorder) session.discardRecorder = null;
-      if (!session.active) return;
-      if (discarded) {
-        if (session.state === 'barge-candidate') {
-          session.state = session.bargeResumeState || 'listening';
-          session.bargeCandidateAt = 0;
-        }
-        return;
+      const discarded = recorder.wordLensDiscarded;
+      const chunks = discarded ? [] : capturedChunks.slice();
+      if (session.recorder === recorder) {
+        session.recorder = null;
+        session.chunks = [];
       }
+      if (session.discardRecorder === recorder) session.discardRecorder = null;
+      if (!session.active || discarded) return;
       const blob = new Blob(chunks, { type: recorder.mimeType || chunks[0]?.type || 'audio/webm' });
       if (!blob.size) {
         session.state = 'listening';
@@ -1379,8 +1376,9 @@
           }else if(voiceGap>180){
             const recorder=session.recorder;
             if(recorder&&recorder.state!=='inactive'){
+              recorder.wordLensDiscarded=true;
               session.discardRecorder=recorder;
-              session.chunks=[];
+              if(session.recorder===recorder)session.chunks=[];
               try{recorder.stop();}catch(_){}
             }
             session.state=session.bargeResumeState||'listening';
