@@ -1224,11 +1224,8 @@ class AIChatApp {
       difficulty: Number.isFinite(winner?.difficulty) ? winner.difficulty : (Number.isFinite(existingCard?.difficulty) ? existingCard.difficulty : (incomingCard?.difficulty ?? null)),
       lapses: Math.max(Number(existingCard?.lapses) || 0, Number(incomingCard?.lapses) || 0),
       lastReviewed,
-      status: ['new', 'learning', 'review', 'relearning'].includes(winner?.status)
-        ? winner.status : (Math.max(existingRep, incomingRep) === 0 ? 'new' : 'review'),
-      learningStep: ['learning', 'relearning'].includes(winner?.status)
-        ? (Number.isInteger(winner?.learningStep) && winner.learningStep >= 0 ? winner.learningStep : 0)
-        : null
+      status: mergedStatus,
+      learningStep: mergedLearningStep
     };
   }
 
@@ -4127,6 +4124,7 @@ Be thorough and comprehensive.`;
     this.currentLeitnerScope = scope;
     
     try {
+      await this.normalizeLeitnerData();
       const allCards = await this.db.getAll(this.LEITNER_STORE);
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -4512,14 +4510,17 @@ Be thorough and comprehensive.`;
 
     try {
       const reviewedAt = new Date();
-      const result = this.calculateFSRSSchedule(cardAtRatingTime, rating, reviewedAt);
-      const previousReviews = Number.isFinite(cardAtRatingTime.repetitions) ? cardAtRatingTime.repetitions : 0;
-      const previousLapses = Number.isFinite(cardAtRatingTime.lapses) ? cardAtRatingTime.lapses : 0;
-      const oldState = ['new', 'learning', 'relearning'].includes(cardAtRatingTime.status)
-        ? cardAtRatingTime.status : (previousReviews === 0 ? 'new' : 'review');
+      // Use the latest persisted record rather than a stale queue snapshot.
+      const sourceCard = (await this.db.get(this.LEITNER_STORE, cardAtRatingTime.id)) || cardAtRatingTime;
+      if (this.currentCard !== cardAtRatingTime) return;
+      const result = this.calculateFSRSSchedule(sourceCard, rating, reviewedAt);
+      const previousReviews = Number.isFinite(sourceCard.repetitions) ? sourceCard.repetitions : 0;
+      const previousLapses = Number.isFinite(sourceCard.lapses) ? sourceCard.lapses : 0;
+      const oldState = ['new', 'learning', 'relearning'].includes(sourceCard.status)
+        ? sourceCard.status : (previousReviews === 0 ? 'new' : 'review');
       const nextDueDate = new Date(reviewedAt.getTime() + result.intervalMs);
       const updatedCard = {
-        ...cardAtRatingTime,
+        ...sourceCard,
         repetitions: previousReviews + 1,
         interval: result.interval,
         easeFactor: cardAtRatingTime.easeFactor || 2.5,
@@ -4538,7 +4539,12 @@ Be thorough and comprehensive.`;
       const savedCard = await this.db.get(this.LEITNER_STORE, updatedCard.id);
       if (!savedCard || savedCard.dueDate !== updatedCard.dueDate ||
           savedCard.status !== updatedCard.status ||
-          savedCard.learningStep !== updatedCard.learningStep) {
+          savedCard.learningStep !== updatedCard.learningStep ||
+          savedCard.repetitions !== updatedCard.repetitions ||
+          savedCard.lastReviewed !== updatedCard.lastReviewed ||
+          savedCard.interval !== updatedCard.interval ||
+          savedCard.stability !== updatedCard.stability ||
+          savedCard.difficulty !== updatedCard.difficulty) {
         throw new Error('The saved flashcard schedule did not match the selected rating.');
       }
       const scheduledCard = savedCard;
