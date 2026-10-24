@@ -53,6 +53,19 @@
     localStorage.setItem('wordlens_local_' + key, (value ?? '').toString().trim());
   };
 
+  // One-time migration from WordLens' former initial Provider 1 defaults.
+  // Keep an explicitly selected Provider 2 or Provider 3 unchanged.
+  const PROVIDER_DEFAULTS_VERSION = 'wordlens_provider3_defaults_v1';
+  if (localStorage.getItem(PROVIDER_DEFAULTS_VERSION) !== '1') {
+    if (!localStorage.getItem('chat_provider') || localStorage.getItem('chat_provider') === 'gemini') {
+      localStorage.setItem('chat_provider', 'openrouter');
+    }
+    if (!localStorage.getItem('tts_provider') || localStorage.getItem('tts_provider') === 'gemini') {
+      localStorage.setItem('tts_provider', 'elevenlabs');
+    }
+    localStorage.setItem(PROVIDER_DEFAULTS_VERSION, '1');
+  }
+
   const normalizeBase = (value) => (value || '').trim().replace(/\/+$/, '');
 
   // Accept either a server root URL or an already-versioned /v1 URL.
