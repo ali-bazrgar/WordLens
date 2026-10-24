@@ -2590,7 +2590,7 @@ class AIChatApp {
       const text = textNode.textContent;
       const parent = textNode.parentElement;
       // Keep code blocks and inline code strictly untouched by font-direction wrappers.
-      if (parent?.closest('pre, code')) continue;
+      if (parent?.closest('pre, code')) return;
       // Check if contains Persian/Arabic characters
       if (/[\u0600-\u06FF\u0750-\u077F]/.test(text)) {
         const parent = textNode.parentNode;
