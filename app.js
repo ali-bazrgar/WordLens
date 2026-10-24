@@ -4682,22 +4682,13 @@ class AdvancedTTSPlayer {
     const mainContent = document.querySelector('.main-content');
     
     const tapHandler = (e) => {
-      // Find which player should handle this click
-      let targetPlayer = null;
-      
-      // Check if click is inside a message with active TTS
+      // Only a click inside the exact message currently being spoken may
+      // control its player. The chat and documents share .main-content, so
+      // falling back to the only active player makes document taps toggle chat TTS.
       const clickedMessage = e.target.closest('.message-wrapper.tts-active');
-      if (clickedMessage) {
-        const messageId = clickedMessage.id;
-        targetPlayer = this.app.activeTTSPlayers.get(messageId);
-      } else {
-        // Click in empty space - use the only active player (if any)
-        if (this.app.activeTTSPlayers.size === 1) {
-          targetPlayer = Array.from(this.app.activeTTSPlayers.values())[0];
-        }
-      }
-      
-      if (!targetPlayer) return;
+      if (!clickedMessage) return;
+      const targetPlayer = this.app.activeTTSPlayers.get(clickedMessage.id);
+      if (!targetPlayer || targetPlayer.messageElement !== clickedMessage) return;
       
       // Don't toggle if clicked on TTS controls
       const clickedControl = e.target.closest('.advanced-tts-controls, .btn-tts-control');
