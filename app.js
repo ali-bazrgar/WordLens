@@ -2523,6 +2523,15 @@ class AIChatApp {
       let normalized = line.replace(/&#x20;/gi, " ");
       // Be forgiving with common model output like "#Title" or "\\###Title".
       normalized = normalized.replace(/^([ \t]{0,3})\\?(#{1,6})(?=\S)/, "$1$2 ");
+      // Models sometimes duplicate heading markers as "# # Introduction".
+      // Merge consecutive marker groups into one valid Markdown heading.
+      normalized = normalized.replace(
+        /^([ \t]{0,3})(#{1,6})((?:[ \t]+#{1,6})+)[ \t]+(.+)$/,
+        (_match, indent, first, repeated, headingText) => {
+          const markerCount = Math.min(6, first.length + (repeated.match(/#{1,6}/g) || []).reduce((sum, marker) => sum + marker.length, 0));
+          return indent + "#".repeat(markerCount) + " " + headingText;
+        }
+      );
       return normalized;
     }).join("\n");
   }
@@ -2821,17 +2830,17 @@ class AIChatApp {
   }
   getEffectiveSystemInstructions() {
     const defaults = [
-      "You are WordLens, a capable and thoughtful general-purpose assistant.",
+      "Help with the user's current request directly. Do not announce a name or identity, say that you are WordLens, describe your own capabilities, or start with a canned introduction unless the user explicitly asks.",
       "Reply in the same language as the user's latest message unless the user asks for another language.",
       "Honor the requested content type, tone, format, and length. If the user asks for a long essay, story, article, comprehensive explanation, or a specific word/page count, provide a genuinely substantial answer rather than a few short paragraphs. Do not arbitrarily shorten a requested long response.",
-      "Use valid, renderable CommonMark Markdown for structured answers. Put a space after Markdown heading markers, for example '# Hello' and '## Introduction'; leave blank lines around headings, lists, block quotes, and fenced code blocks; use '- ' for unordered list items; and format tables with a valid header and separator row.",
-      "For multi-part answers, start with the direct answer and use descriptive ##/### headings, short paragraphs, numbered steps for procedures, bullets for options, tables only for genuine comparisons, and fenced code blocks for code. Avoid giant unbroken paragraphs, excessive headings in short answers, and Markdown that is malformed or escaped as plain text.",
+      "Use valid CommonMark Markdown. For multi-part answers, start with the direct answer and use descriptive headings, short paragraphs, numbered steps for procedures, and bullets for options. Use tables only for genuine comparisons and fenced code blocks for code.",
+      "Use heading markers once per heading only. A heading must look like '## Introduction', never '# # Introduction' or '## ## Introduction'. Put blank lines around headings, lists, block quotes, and fenced code blocks.",
       "Write actual Markdown syntax, not HTML-encoded spaces such as '&#x20;' and not backslash-escaped heading or list markers. Do not wrap ordinary answers in a code fence. Only provide raw Markdown source when explicitly requested.",
-      "Keep simple answers appropriately concise, but never let concision override a clear request for depth or length. If a response is legitimately cut off by a platform limit, make that clear rather than pretending the answer is complete."
+      "Keep simple answers appropriately concise, but never let concision override a clear request for depth or length. Do not self-introduce unless explicitly asked or the saved user instructions require it."
     ].join("\n");
     const custom = (this.customInstructions || "").trim();
     return custom
-      ? `${defaults}\n\nAdditional user preferences (apply when compatible with the current request):\n${custom}`
+      ? `${defaults}\n\nPersistent user instructions from Settings → Custom Instructions (follow whenever relevant):\n${custom}`
       : defaults;
   }
 
@@ -5088,49 +5097,81 @@ class AdvancedTTSPlayer {
     this.resolvePlaybackCompletion = null;
   }
 
-  // Split text into sentences
+  getReadableMessageText(messageDiv, fallbackText = '') {
+    const normalize = value => String(value ?? '')
+      .replace(/\r\n?/g, '\n')
+      .replace(/\u00a0/g, ' ')
+      .split('\n')
+      .map(line => line.replace(/[ \t]+$/g, ''))
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
+    let visibleText = '';
+    if (messageDiv) {
+      // innerText preserves paragraph/list/heading boundaries from rendered Markdown.
+      visibleText = typeof messageDiv.innerText === 'string'
+        ? messageDiv.innerText
+        : (messageDiv.textContent || '');
+    }
+    if (normalize(visibleText)) return normalize(visibleText);
+
+    // Fallback for rare cases where no rendered message node exists.
+    const raw = String(fallbackText ?? '')
+      .replace(/^ {0,3}#{1,6}[ \t]+/gm, '')
+      .replace(/^ {0,3}[-*+][ \t]+/gm, '')
+      .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
+      .replace(/_{1,3}([^_]+)_{1,3}/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    return normalize(raw);
+  }
+
+  // Split visible speech text into sentences and retain source offsets for word-jump alignment.
   splitIntoSentences(text) {
+    const source = String(text ?? '').replace(/\r\n?/g, '\n');
     const sentences = [];
-    
-    // First split by newlines to handle multi-line text
-    const lines = text.split('\n');
-    
-    for (let line of lines) {
-      line = line.trim();
-      if (!line) continue;
-      
-      // Check if it's a bullet point - treat as one sentence
-      if (/^[-*•]\s/.test(line)) {
-        sentences.push(line);
-        continue;
-      }
-      
-      // Split line by sentence-ending punctuation
-      // This regex matches everything up to and including .!?
-      let pos = 0;
-      const punctuationRegex = /[.!?]+/g;
-      let match;
-      
-      while ((match = punctuationRegex.exec(line)) !== null) {
-        const sentence = line.substring(pos, match.index + match[0].length).trim();
-        if (sentence) {
-          sentences.push(sentence);
+    this.sentenceOffsets = [];
+    let lineOffset = 0;
+
+    const pushSlice = (line, start, from, to) => {
+      const slice = line.slice(from, to);
+      const leading = slice.search(/\S/);
+      if (leading < 0) return;
+      const trailing = slice.match(/\s*$/)?.[0].length || 0;
+      const startChar = start + from + leading;
+      const endChar = Math.max(startChar, start + to - trailing);
+      const sentence = source.slice(startChar, endChar);
+      if (!sentence) return;
+      sentences.push(sentence);
+      this.sentenceOffsets.push({ startChar, endChar });
+    };
+
+    for (const line of source.split('\n')) {
+      if (line.trim()) {
+        const firstNonSpace = line.search(/\S/);
+        const trimmedLine = line.slice(firstNonSpace);
+        if (/^[-*•]\s/.test(trimmedLine)) {
+          pushSlice(line, lineOffset, firstNonSpace, line.length);
+        } else {
+          let pos = 0;
+          const punctuationRegex = /[.!?]+/g;
+          let match;
+          while ((match = punctuationRegex.exec(line)) !== null) {
+            pushSlice(line, lineOffset, pos, match.index + match[0].length);
+            pos = match.index + match[0].length;
+          }
+          pushSlice(line, lineOffset, pos, line.length);
         }
-        pos = match.index + match[0].length;
       }
-      
-      // If there's remaining text after last punctuation
-      const remaining = line.substring(pos).trim();
-      if (remaining) {
-        sentences.push(remaining);
-      }
+      lineOffset += line.length + 1;
     }
-    
-    // If no sentences found at all, return the whole text
-    if (sentences.length === 0) {
-      return [text.trim()];
+
+    if (sentences.length === 0 && source.trim()) {
+      const startChar = source.search(/\S/);
+      const endChar = source.trimEnd().length;
+      sentences.push(source.slice(Math.max(0, startChar), endChar));
+      this.sentenceOffsets.push({ startChar: Math.max(0, startChar), endChar });
     }
-    
     return sentences;
   }
 
@@ -5158,33 +5199,28 @@ class AdvancedTTSPlayer {
   async playMessage(text, messageId, controlsContainer, options = {}) {
     this.messageId = messageId;
     this.controlsElement = controlsContainer;
-    this.fullText = text;
     this.preGeneratedAudio = options.audioBlob instanceof Blob && options.audioBlob.size > 0
       ? options.audioBlob
       : null;
     this.realtimeSession = options.realtimeSession || null;
-    this.sentences = this.splitIntoSentences(text);
-    this.words = this.extractWords(text);
     this.currentSentenceIndex = 0;
-    
-    // Store original HTML for restoration and wrap sentences
+
+    // Derive narration and sentence boundaries from rendered text, not Markdown source.
     const messageEl = document.getElementById(messageId);
-    if (messageEl) {
-      const messageDiv = messageEl.querySelector('.message');
-      if (messageDiv) {
-        this.originalHTML = messageDiv.innerHTML;
-        
-        // Check if already wrapped to avoid double wrapping
-        if (!messageDiv.querySelector('.tts-sentence')) {
-          // Pre-wrap all sentences in the DOM for easy highlighting
-          this.wrapSentencesInDOM(messageDiv);
-        }
-        
-        // Add tap-to-pause/play functionality
-        this.setupTapToPause(messageEl);
+    const messageDiv = messageEl ? messageEl.querySelector('.message') : null;
+    this.originalHTML = messageDiv ? messageDiv.innerHTML : null;
+    this.fullText = this.getReadableMessageText(messageDiv, text);
+    this.sentences = this.splitIntoSentences(this.fullText);
+    this.words = this.extractWords(this.fullText);
+
+    if (messageEl && messageDiv) {
+      if (messageDiv.querySelector('.tts-sentence') && this.originalHTML) {
+        messageDiv.innerHTML = this.originalHTML;
       }
+      this.wrapSentencesInDOM(messageDiv);
+      this.setupTapToPause(messageEl);
     }
-    
+
     // Create advanced controls UI
     this.createAdvancedControls();
     
@@ -5819,13 +5855,21 @@ class AdvancedTTSPlayer {
     const messageDiv = messageEl.querySelector('.message');
     if (!messageDiv) return;
     
-    // Calculate sentence timings based on audio duration
-    // Distribute time proportionally based on sentence length
-    const totalChars = this.sentences.reduce((sum, s) => sum + s.length, 0);
+    // Supported TTS providers do not expose per-word timestamps. Estimate each
+    // sentence using visible spoken characters, word count and punctuation pauses.
+    const sentenceWeights = this.sentences.map(sentence => {
+      const lexicalChars = (sentence.match(/[\p{L}\p{N}]/gu) || []).length;
+      const wordCount = (sentence.match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu) || []).length;
+      const commaPauses = (sentence.match(/[,;:—–]/g) || []).length;
+      const terminalPause = /[.!?…][”’"'\])}]*$/.test(sentence) ? 3.5 : 0;
+      return Math.max(1, lexicalChars + wordCount * 1.4 + commaPauses * 2.5 + terminalPause);
+    });
+    const totalWeight = sentenceWeights.reduce((sum, weight) => sum + weight, 0) || 1;
+    const totalDuration = this.audio.duration || 10;
     let cumulativeTime = 0;
-    
+
     this.sentenceTimings = this.sentences.map((sentence, index) => {
-      const sentenceDuration = (sentence.length / totalChars) * (this.audio.duration || 10);
+      const sentenceDuration = (sentenceWeights[index] / totalWeight) * totalDuration;
       const timing = {
         sentenceIndex: index,
         startTime: cumulativeTime,
@@ -6060,15 +6104,13 @@ class AdvancedTTSPlayer {
     // Find which sentence contains this word
     const word = this.words[wordIndex];
     let targetSentenceIndex = -1;
-    let charCount = 0;
-    
-    for (let i = 0; i < this.sentences.length; i++) {
-      const sentenceLength = this.sentences[i].length;
-      if (word.startChar >= charCount && word.startChar < charCount + sentenceLength) {
+
+    for (let i = 0; i < this.sentenceOffsets.length; i++) {
+      const offset = this.sentenceOffsets[i];
+      if (word.startChar >= offset.startChar && word.startChar < offset.endChar) {
         targetSentenceIndex = i;
         break;
       }
-      charCount += sentenceLength;
     }
     
     if (targetSentenceIndex >= 0 && this.sentenceTimings[targetSentenceIndex]) {
