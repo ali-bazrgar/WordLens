@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ai-chat-v11-network-only';
+const CACHE_NAME = 'ai-chat-v12-network-only';
 
 self.addEventListener('install', event => {
   event.waitUntil(self.skipWaiting());
