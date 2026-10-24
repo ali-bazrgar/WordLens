@@ -5071,6 +5071,7 @@ class AdvancedTTSPlayer {
     this.currentSentenceIndex = 0;
     this.sentenceTimings = [];
     this.words = [];
+    this.sentenceOffsets = [];
     this.animationFrameId = null;
     this.startTime = 0;
     this.pausedTime = 0;
