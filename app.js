@@ -2818,17 +2818,17 @@ class AIChatApp {
   }
 
   // ---------- Dictionary / Translation ----------
-  async getWordMeaning(word) {
-    if (this.chatProvider === 'avalai') return this.getWordMeaningAvalai(word);
-    if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word);
-    return this.getWordMeaningGemini(word);
+  async getWordMeaning(word, options = {}) {
+    if (this.chatProvider === 'avalai') return this.getWordMeaningAvalai(word, options);
+    if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word, options);
+    return this.getWordMeaningGemini(word, options);
   }
 
-  async getWordMeaningOpenRouter(word) {
+  async getWordMeaningOpenRouter(word, options = {}) {
     const lowerWord = word.toLowerCase().trim();
     try {
       const cachedMeaning = await this.db.get('word_meanings', lowerWord);
-      if (cachedMeaning) return cachedMeaning.value;
+      if (!options.forceRefresh && cachedMeaning) return cachedMeaning.value;
     } catch (err) {
       console.error("Error reading meaning cache:", err);
     }
@@ -2994,9 +2994,9 @@ Be thorough and comprehensive.`;
     }
   }
 
-  async getWordMeaningAvalai(word) {
+  async getWordMeaningAvalai(word, options = {}) {
     const lowerWord = word.toLowerCase().trim();
-    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (cachedMeaning) return cachedMeaning.value; } catch (err) { console.error("Error reading meaning cache:", err); }
+    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (!options.forceRefresh && cachedMeaning) return cachedMeaning.value; } catch (err) { console.error("Error reading meaning cache:", err); }
     if (!this.AVALAI_API_KEY) return { meanings: [{ text: `No Provider 2 API Key`, type: "Error" }], synonyms: [], antonyms: [] };
     
     const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
@@ -3059,9 +3059,9 @@ Be thorough and comprehensive.`;
     }
   }
 
-  async getWordMeaningGemini(word) {
+  async getWordMeaningGemini(word, options = {}) {
     const lowerWord = word.toLowerCase().trim();
-    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (cachedMeaning) { return cachedMeaning.value; } } catch (err) { console.error("Error reading meaning cache:", err); }
+    try { const cachedMeaning = await this.db.get('word_meanings', lowerWord); if (!options.forceRefresh && cachedMeaning) { return cachedMeaning.value; } } catch (err) { console.error("Error reading meaning cache:", err); }
     if (!this.API_KEY) return { meanings: [{ text: `No API Key`, type: "Error" }], synonyms: [], antonyms: [] };
     
     const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
