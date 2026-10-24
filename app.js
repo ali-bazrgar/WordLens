@@ -165,7 +165,7 @@ const dialogManager = new DialogManager();
 
 // --- Database Helper for Caching ---
 class CacheDB {
-  constructor(dbName = "AIChatCache", version = 6) {
+  constructor(dbName = "AIChatCache", version = 7) {
     this.dbName = dbName;
     this.version = version;
     this.db = null;
@@ -194,6 +194,11 @@ class CacheDB {
         // Create audio_cache store if not exists
         if (!db.objectStoreNames.contains("audio_cache")) {
           db.createObjectStore("audio_cache", { keyPath: "text" });
+        }
+
+        // Cache full-sentence translations so they remain available offline.
+        if (!db.objectStoreNames.contains("translations")) {
+          db.createObjectStore("translations", { keyPath: "source" });
         }
         
         // Create leitner_cards_v2 store if not exists
@@ -268,10 +273,13 @@ class CacheDB {
     if (!this.db) await this.init();
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(storeName, "readwrite");
-      const store = transaction.objectStore(storeName);
-      const request = store.put(data);
-      request.onsuccess = () => resolve();
-      request.onerror = (event) => { console.error(`Error setting data in ${storeName}:`, event.target.error); reject(event.target.error); };
+      transaction.objectStore(storeName).put(data);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => {
+        console.error(`Error setting data in ${storeName}:`, transaction.error);
+        reject(transaction.error || new Error(`Failed to save data in ${storeName}`));
+      };
+      transaction.onabort = () => reject(transaction.error || new Error(`Saving data in ${storeName} was aborted`));
     });
   }
 
@@ -279,10 +287,13 @@ class CacheDB {
     if (!this.db) await this.init();
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(storeName, "readwrite");
-      const store = transaction.objectStore(storeName);
-      const request = store.delete(key);
-      request.onsuccess = () => resolve();
-      request.onerror = (event) => { console.error(`Error deleting data from ${storeName}:`, event.target.error); reject(event.target.error); };
+      transaction.objectStore(storeName).delete(key);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => {
+        console.error(`Error deleting data from ${storeName}:`, transaction.error);
+        reject(transaction.error || new Error(`Failed to delete data from ${storeName}`));
+      };
+      transaction.onabort = () => reject(transaction.error || new Error(`Deleting data from ${storeName} was aborted`));
     });
   }
 
@@ -333,7 +344,9 @@ class AIChatApp {
     this.selectionTimeout = null;
     this.currentUtterance = null;
     this.db = new CacheDB();
-  this.LEITNER_STORE = 'leitner_cards_v2';
+    this.activeAudioElement = null;
+    this.activeAudioUrl = null;
+    this.LEITNER_STORE = 'leitner_cards_v2';
 
     this.leitnerQueue = [];
     this.currentCard = null;
@@ -370,6 +383,14 @@ class AIChatApp {
   // ---------- INIT / UI ----------
   async initApp() {
     await this.db.init().catch(err => console.error("Failed to initialize cache DB.", err));
+    // Ask supported browsers to preserve local study data instead of treating it as disposable.
+    try {
+      if (navigator.storage && typeof navigator.storage.persist === 'function') {
+        await navigator.storage.persist();
+      }
+    } catch (error) {
+      console.debug('Persistent local storage request was unavailable:', error);
+    }
 
     // One-time/defensive normalization: keep Leitner cards consistent across legacy migrations/imports
     await this.normalizeLeitnerData().catch(err => console.error('[Leitner] Failed to normalize cards:', err));
@@ -1102,9 +1123,13 @@ class AIChatApp {
     const difficulty = Number.isFinite(card.difficulty) ? Math.min(10, Math.max(1, card.difficulty)) : null;
     const lapses = Number.isFinite(card.lapses) ? Math.max(0, Math.floor(card.lapses)) : 0;
     const allowedStatuses = new Set(['new', 'learning', 'review', 'relearning']);
-    const status = allowedStatuses.has(card.status)
+    let status = allowedStatuses.has(card.status)
       ? card.status
       : (repetitions === 0 ? 'new' : 'review');
+    // A reviewed card must never revert to the "new" state; that would keep
+    // showing the initial 1m / 6m / 10m / 1d choices forever.
+    if (repetitions > 0 && status === 'new') status = 'review';
+    if (repetitions === 0 && status === 'review') status = 'new';
     const learningStep = ['learning', 'relearning'].includes(status)
       ? (Number.isInteger(card.learningStep) && card.learningStep >= 0 ? card.learningStep : 0)
       : null;
@@ -1168,6 +1193,16 @@ class AIChatApp {
 
     const lastReviewedIso = this.coerceIsoDate(incomingLastTs >= existingLastTs ? incomingCard?.lastReviewed : existingCard?.lastReviewed, null);
     const lastReviewed = (incomingLastTs >= 0 || existingLastTs >= 0) ? lastReviewedIso : null;
+    const mergedRepetitions = Math.max(existingRep, incomingRep);
+    let mergedStatus = winner?.status;
+    if (!['new', 'learning', 'review', 'relearning'].includes(mergedStatus)) {
+      mergedStatus = mergedRepetitions === 0 ? 'new' : 'review';
+    }
+    if (mergedRepetitions > 0 && mergedStatus === 'new') mergedStatus = 'review';
+    if (mergedRepetitions === 0 && mergedStatus === 'review') mergedStatus = 'new';
+    const mergedLearningStep = ['learning', 'relearning'].includes(mergedStatus)
+      ? (Number.isInteger(winner?.learningStep) && winner.learningStep >= 0 ? winner.learningStep : 0)
+      : null;
 
     return {
       ...winner,
@@ -1179,7 +1214,9 @@ class AIChatApp {
       scopeKey: incomingCard.scopeKey,
       createdAt,
       dueDate,
-      repetitions: Math.max(existingRep, incomingRep),
+      repetitions: mergedRepetitions,
+      status: mergedStatus,
+      learningStep: mergedLearningStep,
       interval: Number.isFinite(winner?.fsrsVersion) && winner.fsrsVersion >= 6 && Number.isFinite(winner?.interval) ? winner.interval : intervalDays,
       easeFactor: Math.max(1.3, Number.isFinite(winner?.easeFactor) ? winner.easeFactor : 2.5),
       fsrsVersion: Math.max(Number(existingCard?.fsrsVersion) || 0, Number(incomingCard?.fsrsVersion) || 0),
@@ -2220,9 +2257,61 @@ class AIChatApp {
     return tokenCount <= 2 && text.length <= 64 ? 0.78 : 1;
   }
 
+  getAudioCacheKey(text) {
+    return String(text ?? '').normalize('NFC').trim().replace(/\s+/g, ' ');
+  }
+
+  async getCachedAudio(text) {
+    const originalText = String(text ?? '');
+    const cacheKey = this.getAudioCacheKey(originalText);
+    // Check the exact legacy key first, then the canonical whitespace-normalized key.
+    let cached = await this.db.get('audio_cache', originalText);
+    if (!cached && cacheKey !== originalText) cached = await this.db.get('audio_cache', cacheKey);
+    return cached?.value || null;
+  }
+
+  async saveAudioCache(text, audioBlob) {
+    if (!audioBlob || !(audioBlob instanceof Blob)) return;
+    try {
+      await this.db.set('audio_cache', {
+        text: this.getAudioCacheKey(text),
+        originalText: String(text ?? ''),
+        value: audioBlob,
+        savedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('Failed to cache generated audio:', error);
+    }
+  }
+
+  stopCurrentAudioPlayback() {
+    try { if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel(); } catch (_) {}
+    const activeAudio = this.activeAudioElement;
+    if (activeAudio) {
+      try { activeAudio.pause(); activeAudio.currentTime = 0; } catch (_) {}
+      if (this.activeAudioUrl) {
+        try { URL.revokeObjectURL(this.activeAudioUrl); } catch (_) {}
+      }
+      this.activeAudioElement = null;
+      this.activeAudioUrl = null;
+    }
+  }
+
   async playAudio(audioBlob, button, progressBar, spokenText = "") {
+    if (!audioBlob) throw new Error('No audio data was available to play.');
+    if (!button) button = document.createElement('button');
+    this.stopCurrentAudioPlayback();
     const audioUrl = URL.createObjectURL(audioBlob);
     const audio = new Audio(audioUrl);
+    this.activeAudioElement = audio;
+    this.activeAudioUrl = audioUrl;
+    const cleanupAudio = () => {
+      if (this.activeAudioElement === audio) {
+        this.activeAudioElement = null;
+        this.activeAudioUrl = null;
+      }
+      try { URL.revokeObjectURL(audioUrl); } catch (_) {}
+    };
     audio.playbackRate = this.getTTSPlaybackRate(spokenText);
     try { audio.preservesPitch = true; } catch (_) {}
     try { audio.webkitPreservesPitch = true; } catch (_) {}
@@ -2240,30 +2329,61 @@ class AIChatApp {
         this.updateProgress(progressBar, 100);
         setTimeout(() => this.updateProgress(progressBar, 0), 500);
       }
-      URL.revokeObjectURL(audioUrl);
+      cleanupAudio();
     });
     audio.addEventListener("error", (e) => {
       console.error("Audio playback error:", e);
       button.classList.remove("playing");
       button.disabled = false;
+      cleanupAudio();
       this.showToast("Failed to play audio.", "error");
     });
-    await audio.play();
+    try {
+      await audio.play();
+    } catch (error) {
+      button.classList.remove("playing");
+      button.disabled = false;
+      cleanupAudio();
+      throw error;
+    }
   }
 
   async playTextToSpeech(text, button, progressBar, messageId) {
-    if (speechSynthesis.speaking) {
+    const spokenText = String(text ?? '').trim();
+    if (!spokenText) return;
+    text = spokenText;
+    if (!button) button = document.createElement('button');
+
+    if (typeof speechSynthesis !== 'undefined' && speechSynthesis.speaking) {
+      // Clicking the same active browser-TTS button toggles it off; changing
+      // cards cancels the old utterance and starts the new card's word.
+      if (button.classList.contains('playing')) {
+        speechSynthesis.cancel();
+        button.classList.remove('playing');
+        button.disabled = false;
+        return;
+      }
       speechSynthesis.cancel();
-      return;
     }
     try {
-      const cachedAudio = await this.db.get('audio_cache', text);
-      if (cachedAudio && cachedAudio.value) {
-        await this.playAudio(cachedAudio.value, button, progressBar, text);
-        return;
+      const cachedAudio = await this.getCachedAudio(text);
+      if (cachedAudio) {
+        try {
+          await this.playAudio(cachedAudio, button, progressBar, text);
+          return;
+        } catch (playError) {
+          console.warn('Cached audio could not be played; trying a fresh voice:', playError);
+        }
       }
     } catch (err) {
       console.error("Error reading audio cache:", err);
+    }
+
+    // Browser voices can provide a usable fallback while offline. Unlike
+    // provider-generated audio, browser speech does not expose a reusable Blob.
+    if (navigator.onLine === false) {
+      this.playWithBrowserTTS(text, button, progressBar, messageId);
+      return;
     }
     if (this.ttsProvider === 'avalai' && this.AVALAI_API_KEY) {
       this.playWithAvalaiTTS(text, button, progressBar);
@@ -2372,8 +2492,8 @@ class AIChatApp {
         throw new Error(`ElevenLabs TTS API error: ${response.status} ${errorText}`);
       }
       const audioBlob = await response.blob();
+      await this.saveAudioCache(text, audioBlob);
       await this.playAudio(audioBlob, button, progressBar, text);
-      await this.db.set('audio_cache', { text: text, value: audioBlob }).catch(err => console.error("Failed to cache audio:", err));
     } catch (error) {
       console.error("ElevenLabs TTS Error:", error);
       button.classList.remove("playing");
@@ -2449,8 +2569,8 @@ class AIChatApp {
       const pcmDataBuffer = this.base64ToArrayBuffer(audioData);
       const pcm16 = new Int16Array(pcmDataBuffer);
       const wavBlob = this.pcmToWav(pcm16, sampleRate);
+      await this.saveAudioCache(text, wavBlob);
       await this.playAudio(wavBlob, button, progressBar, text);
-      await this.db.set('audio_cache', { text: text, value: wavBlob }).catch(err => console.error("Failed to cache audio:", err));
     } catch (error) {
       console.error("Provider 1 TTS Error:", error);
       button.classList.remove("playing");
@@ -3534,8 +3654,15 @@ Be thorough and comprehensive.`;
     await loadMeaning(false);
   }
 
-  playLeitnerCardAudio() { if (this.currentCard) { this.playTextToSpeech(this.currentCard.word, this.leitnerPlayAudioBtn, null, null); } }
-  playTranslationAudio() { const text = this.originalTextEl.textContent; if (text) { this.playTextToSpeech(text, this.playTranslationAudioBtn, null, null); } }
+  playLeitnerCardAudio() {
+    if (!this.currentCard) return Promise.resolve();
+    return this.playTextToSpeech(this.currentCard.word, this.leitnerPlayAudioBtn, null, null);
+  }
+  playTranslationAudio() {
+    const text = this.originalTextEl.textContent;
+    if (text) return this.playTextToSpeech(text, this.playTranslationAudioBtn, null, null);
+    return Promise.resolve();
+  }
 
   buildTranslationPrompt(text, options = {}) {
     const sourceText = String(text ?? '').trim();
@@ -3732,6 +3859,29 @@ Be thorough and comprehensive.`;
     const requestId = `${Date.now()}-${requestVersion}-${Math.random().toString(36).slice(2, 8)}`;
     const options = { refresh: isRefresh, previousTranslation, requestId };
 
+    // Normal translation opens read the saved result first. The retry button
+    // intentionally bypasses this cache so it can request a new wording.
+    if (!isRefresh) {
+      try {
+        const cacheKey = normalizedSource.normalize('NFC').replace(/\s+/g, ' ').trim();
+        const cached = await this.db.get('translations', cacheKey);
+        if (requestVersion !== this.translationRequestVersion) return;
+        if (cached && typeof cached.translation === 'string' && cached.translation.trim()) {
+          this.lastTranslationResult = cached.translation;
+          this.translatedTextEl.textContent = cached.translation;
+          if (refreshButton) {
+            refreshButton.disabled = false;
+            refreshButton.removeAttribute('aria-busy');
+            refreshButton.classList.remove('is-loading');
+            refreshButton.title = 'Generate a different translation';
+          }
+          return;
+        }
+      } catch (error) {
+        console.debug('Could not read cached translation:', error);
+      }
+    }
+
     if (refreshButton) {
       refreshButton.disabled = true;
       refreshButton.setAttribute('aria-busy', 'true');
@@ -3759,13 +3909,24 @@ Be thorough and comprehensive.`;
       }
 
       if (!cleanTranslation) throw new Error('The translation provider returned an empty response.');
+      const cacheKey = normalizedSource.normalize('NFC').replace(/\s+/g, ' ').trim();
+      await this.db.set('translations', {
+        source: cacheKey,
+        translation: cleanTranslation,
+        updatedAt: new Date().toISOString()
+      }).catch(error => console.error('Failed to cache translation:', error));
       this.lastTranslationResult = cleanTranslation;
       this.translatedTextEl.textContent = cleanTranslation;
     } catch (error) {
       if (requestVersion !== this.translationRequestVersion) return;
       console.error('Failed to generate translation:', error);
-      this.translatedTextEl.textContent = 'Translation failed: ' + (error?.message || String(error));
-      this.showToast('Could not regenerate translation: ' + (error?.message || String(error)), 'error');
+      const message = error?.message || String(error);
+      this.translatedTextEl.textContent = (navigator.onLine === false)
+        ? 'Offline: no saved translation exists for this text yet.'
+        : 'Translation failed: ' + message;
+      this.showToast((navigator.onLine === false)
+        ? 'This text has no cached translation. Connect once to save it for offline use.'
+        : 'Could not translate this text: ' + message, 'error');
     } finally {
       if (requestVersion === this.translationRequestVersion && refreshButton) {
         refreshButton.disabled = false;
@@ -4076,11 +4237,29 @@ Be thorough and comprehensive.`;
     this.leitnerStatsNew.textContent = `New: ${newCount}`;
     this.leitnerStatsDue.textContent = `Review: ${reviewCount} | Remaining: ${remaining}`;
     
+    this.stopCurrentAudioPlayback();
+    if (this.leitnerPlayAudioBtn) {
+      this.leitnerPlayAudioBtn.disabled = false;
+      this.leitnerPlayAudioBtn.classList.remove('playing');
+      this.leitnerPlayAudioBtn.title = 'Play ' + this.currentCard.word;
+      this.leitnerPlayAudioBtn.setAttribute('aria-label', 'Play audio for ' + this.currentCard.word);
+    }
     this.leitnerCard.classList.remove('is-flipped');
     this.leitnerRatingControls.classList.add('hidden');
     this.leitnerInitialControls.classList.remove('hidden');
     this.cardFrontText.textContent = this.currentCard.word;
     this.cardBackText.innerHTML = '<div class="card-meaning-item">Loading meaning...</div>';
+
+    // Start audio for every displayed card. Some mobile browsers may block
+    // automatic playback without a fresh gesture, so the speaker remains available.
+    const cardToSpeak = this.currentCard;
+    this.playLeitnerCardAudio().catch(error => {
+      console.debug('Automatic flashcard audio was blocked or unavailable:', error);
+      if (this.currentCard === cardToSpeak && this.leitnerPlayAudioBtn) {
+        this.leitnerPlayAudioBtn.classList.remove('playing');
+        this.leitnerPlayAudioBtn.disabled = false;
+      }
+    });
   }
   
   showFinishedScreen() {
@@ -4349,10 +4528,21 @@ Be thorough and comprehensive.`;
       };
 
       await this.db.set(this.LEITNER_STORE, updatedCard);
-      // Read back the persisted record so timers/queues never reuse an old object.
-      const savedCard = await this.db.get(this.LEITNER_STORE, updatedCard.id).catch(() => null);
-      const scheduledCard = savedCard || updatedCard;
+      // Read the committed record back; do not advance on a stale or failed write.
+      const savedCard = await this.db.get(this.LEITNER_STORE, updatedCard.id);
+      if (!savedCard || savedCard.dueDate !== updatedCard.dueDate ||
+          savedCard.status !== updatedCard.status ||
+          savedCard.learningStep !== updatedCard.learningStep) {
+        throw new Error('The saved flashcard schedule did not match the selected rating.');
+      }
+      const scheduledCard = savedCard;
       await this.refreshLeitnerDueCacheForWord(scheduledCard.word, this.currentLeitnerScope);
+      const ratingLabels = { 1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy' };
+      this.showToast(
+        `Saved: ${ratingLabels[rating]} — next review in ${this.formatInterval(result.interval)}.`,
+        'success',
+        2600
+      );
 
       if (result.scheduleKind === 'learning' || result.scheduleKind === 'relearning') {
         const sessionId = this.leitnerReviewSessionId;
@@ -4614,13 +4804,15 @@ Be thorough and comprehensive.`;
       this.showToast('Exporting data... Please wait.', 'info');
       
       // Get all data from IndexedDB
-      const [wordMeanings, audioCache, leitnerCards] = await Promise.all([
+      const [wordMeanings, audioCache, translations, leitnerCards] = await Promise.all([
         this.db.getAll('word_meanings'),
         this.db.getAll('audio_cache'),
+        this.db.getAll('translations'),
         includeLeitnerCards ? this.db.getAll(this.LEITNER_STORE) : Promise.resolve([])
       ]);
 
       console.log('Export - Word Meanings:', wordMeanings.length);
+      console.log('Export - Translations:', translations.length);
       console.log('Export - Audio Cache:', audioCache.length);
       console.log('Export - Leitner Cards:', includeLeitnerCards ? leitnerCards.length : 0);
 
@@ -4643,7 +4835,7 @@ Be thorough and comprehensive.`;
       console.log('Export - Serialized Audio:', serializedAudio.length);
 
       const backup = {
-        version: 2,
+        version: 3,
         exportedAt: new Date().toISOString(),
         localStorage: {
           chats: this.chats || [],
@@ -4660,6 +4852,7 @@ Be thorough and comprehensive.`;
         },
         indexedDB: {
           word_meanings: wordMeanings || [],
+          translations: translations || [],
           audio_cache: serializedAudio || [],
           leitner_cards_v2: includeLeitnerCards ? (leitnerCards || []) : []
         }
@@ -4669,6 +4862,7 @@ Be thorough and comprehensive.`;
         chatsCount: backup.localStorage.chats.length,
         documentsCount: backup.localStorage.documents.length,
         wordMeaningsCount: backup.indexedDB.word_meanings.length,
+        translationsCount: backup.indexedDB.translations.length,
         audioCacheCount: backup.indexedDB.audio_cache.length,
         leitnerCardsCount: backup.indexedDB.leitner_cards_v2.length
       });
@@ -4856,6 +5050,22 @@ Be thorough and comprehensive.`;
           console.log('Import - Word meanings imported:', importedMeanings);
         } else {
           console.log('Import - No word meanings found in backup');
+        }
+
+        // Import cached phrase translations (older backups without this field remain supported).
+        await this.db.clearStore('translations');
+        if (Array.isArray(indexedData.translations)) {
+          let importedTranslations = 0;
+          for (const entry of indexedData.translations) {
+            if (!entry || typeof entry.source !== 'string' || typeof entry.translation !== 'string') continue;
+            try {
+              await this.db.set('translations', entry);
+              importedTranslations++;
+            } catch (error) {
+              console.error('Failed to import cached translation:', entry.source, error);
+            }
+          }
+          console.log('Import - Translations imported:', importedTranslations);
         }
 
         // Import leitner cards - support both old and new format
