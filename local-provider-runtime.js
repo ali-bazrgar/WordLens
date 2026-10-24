@@ -237,8 +237,8 @@
       const requestBody = { model, messages, ...extra };
       if (useStream) {
         requestBody.stream = true;
-        // Avoid Qwen3.5 spending its small live-turn budget on hidden reasoning.
-        if (/^qwen3\.5(?:[-_]|$)/i.test(model)) requestBody.reasoning_effort = 'none';
+        // Qwen3.5 reasoning is disabled by the configured llama-server launch flags.
+        // Avoid sending unsupported, model-specific fields to other OpenAI-compatible servers.
       }
       response = await fetchWithNetworkDiagnostics(base + '/chat/completions', {
         method: 'POST',
@@ -304,7 +304,7 @@
       const reasoningOnly = Boolean(lastChoice?.message?.reasoning_content || lastChoice?.delta?.reasoning_content);
       throw new Error('OpenAI-compatible LLM returned no final text' + suffix +
         (reasoningOnly
-          ? '. The model returned reasoning but no answer text; verify llama-server uses --reasoning off or supports reasoning_effort="none".'
+          ? '. The model returned reasoning but no answer text; verify llama-server was started with --reasoning off.'
           : '. Check the model alias and llama-server output.'));
     }
     return content;
