@@ -3561,3 +3561,24 @@ body.theme-rgb-glass .settings-textarea:focus-visible {
     font-size: 14px;
   }
 }
+
+
+/* Translation popup refresh control: share the same accessible feedback as word refresh. */
+#retry-translation-btn {
+  flex-shrink: 0;
+}
+
+#retry-translation-btn:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+#retry-translation-btn.is-loading svg {
+  animation: word-meaning-refresh-spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #retry-translation-btn.is-loading svg {
+    animation: none;
+  }
+}
