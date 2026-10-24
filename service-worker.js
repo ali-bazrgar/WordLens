@@ -1,21 +1,125 @@
-const CACHE_NAME = 'ai-chat-v16-network-only';
+const CACHE_NAME = 'wordlens-app-v17-offline-storage-flashcards-audio';
+const APP_BASE = self.registration.scope;
+const APP_VERSION = '20261024-offline-storage-flashcards-audio';
+
+// The app shell, local data, and flashcards work offline after one successful
+// online visit. API endpoints are intentionally never cached.
+const APP_SHELL = [
+  './',
+  './index.html',
+  './style.css?v=' + APP_VERSION,
+  './app.js?v=' + APP_VERSION,
+  './local-provider.js',
+  './local-provider-runtime.js?v=' + APP_VERSION,
+  './manifest.json',
+  './favicon.ico',
+  './icons/icon-192x192.png',
+  './icons/icon-512x512.png'
+];
+
+const MARKED_URL = 'https://cdn.jsdelivr.net/npm/marked/marked.min.js';
+
+async function cacheFirstPartyAsset(cache, relativeUrl) {
+  try {
+    const request = new Request(new URL(relativeUrl, APP_BASE).href, { cache: 'reload' });
+    const response = await fetch(request);
+    if (response && response.ok) await cache.put(request, response.clone());
+  } catch (error) {
+    // Keep the worker installable if a non-essential asset is temporarily unavailable.
+    console.warn('[WordLens SW] Could not precache:', relativeUrl, error);
+  }
+}
+
+async function cacheMarkdownDependency(cache) {
+  try {
+    // Script tags use no-cors requests. Cache the same URL/mode so Markdown
+    // rendering remains available if the CDN is unreachable after installation.
+    const request = new Request(MARKED_URL, { mode: 'no-cors', cache: 'reload' });
+    const response = await fetch(request);
+    if (response && (response.ok || response.type === 'opaque')) {
+      await cache.put(request, response.clone());
+    }
+  } catch (error) {
+    console.warn('[WordLens SW] Markdown library will use the app fallback:', error);
+  }
+}
 
 self.addEventListener('install', event => {
-  event.waitUntil(self.skipWaiting());
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    await Promise.allSettled([
+      ...APP_SHELL.map(url => cacheFirstPartyAsset(cache, url)),
+      cacheMarkdownDependency(cache)
+    ]);
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {
     const names = await caches.keys();
-    await Promise.all(names.map(name => caches.delete(name)));
+    // Only remove older WordLens caches; leave unrelated apps' caches untouched.
+    await Promise.all(names
+      .filter(name => name.startsWith('wordlens-app-') && name !== CACHE_NAME)
+      .map(name => caches.delete(name)));
     await self.clients.claim();
   })());
 });
 
-// Deliberately do not rewrite/cache application resources here.
-// server.py is the authoritative same-origin Local Provider bridge.
 self.addEventListener('fetch', event => {
-  // Preserve request metadata and bodies exactly, including mobile multipart
-  // microphone uploads. The server's no-cache headers keep app assets fresh.
-  event.respondWith(fetch(event.request));
+  const request = event.request;
+  if (request.method !== 'GET') {
+    // POST bodies and microphone uploads must never be cached or rewritten.
+    event.respondWith(fetch(request));
+    return;
+  }
+
+  const url = new URL(request.url);
+  const scopeUrl = new URL(APP_BASE);
+  const localApiPath = new URL('local-api/', APP_BASE).pathname;
+  if (url.origin === scopeUrl.origin && url.pathname.startsWith(localApiPath)) {
+    // Local AI/TTS/STT proxies need a running server and live upstreams.
+    event.respondWith(fetch(request));
+    return;
+  }
+
+  if (request.mode === 'navigate') {
+    event.respondWith((async () => {
+      try {
+        const response = await fetch(request);
+        if (response && response.ok) {
+          const cache = await caches.open(CACHE_NAME);
+          await cache.put(request, response.clone()).catch(() => {});
+        }
+        return response;
+      } catch (error) {
+        return (await caches.match(request)) ||
+          (await caches.match(new URL('./index.html', APP_BASE).href)) ||
+          new Response('WordLens is not available offline yet. Open it once while connected to the internet, then try again.', {
+            status: 503,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+          });
+      }
+    })());
+    return;
+  }
+
+  event.respondWith((async () => {
+    const cached = await caches.match(request);
+    if (cached) return cached;
+
+    try {
+      const response = await fetch(request);
+      if (response && (response.ok || response.type === 'opaque')) {
+        const cache = await caches.open(CACHE_NAME);
+        await cache.put(request, response.clone()).catch(() => {});
+      }
+      return response;
+    } catch (error) {
+      return new Response('This resource is not cached for offline use.', {
+        status: 503,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+      });
+    }
+  })());
 });
