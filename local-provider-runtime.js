@@ -1077,32 +1077,13 @@
           return [];
         };
 
-        let relatedTermsRetried = false;
         const initialSynonyms = getTermList(result, ['synonyms', 'synonym', 'near_synonyms', 'synonyms_en', 'similar_words']);
         const initialAntonyms = getTermList(result, ['antonyms', 'antonym', 'opposites', 'opposite_words', 'antonyms_en']);
         result = { ...result, synonyms: initialSynonyms, antonyms: initialAntonyms };
 
-        // Request only missing vocabulary. Do not regenerate the Persian meanings
-        // just to fill a missing synonym or antonym list.
-        if (!initialSynonyms.length || !initialAntonyms.length) {
-          relatedTermsRetried = true;
-          try {
-            const needSynonyms = !initialSynonyms.length;
-            const needAntonyms = !initialAntonyms.length;
-            const relatedResult = await this.getWordRelatedTerms(word, { needSynonyms, needAntonyms });
-            const retrySynonyms = getTermList(relatedResult, ['synonyms', 'synonym', 'near_synonyms', 'similar_words', 'synonyms_en']);
-            const retryAntonyms = getTermList(relatedResult, ['antonyms', 'antonym', 'opposites', 'opposite_words', 'antonyms_en']);
-            result = {
-              ...result,
-              synonyms: needSynonyms && retrySynonyms.length ? retrySynonyms : initialSynonyms,
-              antonyms: needAntonyms && retryAntonyms.length ? retryAntonyms : initialAntonyms
-            };
-          } catch (relatedError) {
-            console.warn('[WordLens] Related-word recovery failed:', relatedError);
-          }
-        }
-
-        let changed = relatedTermsRetried;
+        // Missing related words are completed asynchronously by the popup, so the
+        // Persian meaning is shown as soon as its first response arrives.
+        let changed = false;
         const seenMeanings = new Set();
         const meanings = result.meanings.map(item => {
           if (typeof item === 'string') {
@@ -1157,7 +1138,10 @@
       });
     }
 
-    AIChatApp.prototype.getWordRelatedTerms = async function(word, { needSynonyms = true, needAntonyms = true } = {}) {
+    const originalGetWordRelatedTerms = AIChatApp.prototype.getWordRelatedTerms;
+    AIChatApp.prototype.getWordRelatedTerms = async function(word, options = {}) {
+      const { needSynonyms = true, needAntonyms = true } = options;
+      if (this.chatProvider !== 'openrouter') return originalGetWordRelatedTerms.call(this, word, options);
       const target = String(word ?? '').trim();
       if (!target || (!needSynonyms && !needAntonyms)) return { synonyms: [], antonyms: [] };
 
