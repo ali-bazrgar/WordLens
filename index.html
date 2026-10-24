@@ -384,11 +384,19 @@
                 <line x1="8" y1="23" x2="16" y2="23"></line>
               </svg>
             </button>
+            <button id="realtime-btn" class="btn-voice btn-realtime" title="Start live conversation" aria-label="Start live conversation" aria-pressed="false">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 14v-3a9 9 0 0 1 18 0v3"></path>
+                <path d="M5 14h2a2 2 0 0 1 2 2v3H7a4 4 0 0 1-4-4v-1z"></path>
+                <path d="M19 14h-2a2 2 0 0 0-2 2v3h2a4 4 0 0 0 4-4v-1z"></path>
+              </svg>
+            </button>
             <textarea id="message-input" placeholder="Type a message..." rows="1"></textarea>
             <button id="send-btn" class="btn-send">
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-arrow-up"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
             </button>
           </div>
+          <div id="realtime-status" class="realtime-status hidden" role="status" aria-live="polite"></div>
         </div>
       </div>
 
@@ -444,6 +452,8 @@
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="app.js"></script>
+  <!-- Loaded explicitly so voice controls and API settings also work when app.js is served as a plain file. -->
+  <script src="local-provider-runtime.js"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {

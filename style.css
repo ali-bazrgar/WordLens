@@ -613,6 +613,47 @@ body.theme-dark .toast-close:hover {
   animation: pulse 1.5s infinite;
 }
 
+.btn-realtime {
+  background: #6366f1;
+  margin-right: 0;
+}
+
+.btn-realtime:hover { background: #4f46e5; }
+
+.btn-realtime.active {
+  background: #dc2626;
+  animation: pulse 1.5s infinite;
+}
+
+.realtime-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 4px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.realtime-status::before {
+  content: ""; display: inline-block; width: 7px; height: 7px;
+  border-radius: 50%; flex: 0 0 7px; background: #94a3b8;
+}
+.realtime-status[data-state="listening"]::before { background: #10b981; }
+.realtime-status[data-state="recording"]::before { background: #ef4444; }
+.realtime-status[data-state="processing"]::before { background: #f59e0b; }
+.realtime-status[data-state="speaking"]::before { background: #6366f1; }
+.realtime-status[data-state="error"] { color: #b91c1c; }
+.realtime-status[data-state="error"]::before { background: #ef4444; }
+
+body.theme-rgb-glass .btn-realtime {
+  background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%) !important;
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.45) !important;
+  border: 1px solid rgba(129, 140, 248, 0.6) !important;
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.7; }
