@@ -249,7 +249,10 @@
       <input type="text" id="local-stt-model" placeholder="whisper-1">
       <label style="display:block;margin:8px 0 4px;">STT Language</label>
       <input type="text" id="local-stt-language" placeholder="en, fa, or auto">
-      <button type="button" id="local-provider-test" class="btn-secondary" style="margin-top:10px;">Test LLM + TTS connections</button>
+      <div class="modal-buttons" style="margin-top:10px;">
+        <button type="button" id="local-provider-test" class="btn-secondary">Test LLM + TTS</button>
+        <button type="button" id="local-stt-test" class="btn-secondary">Test STT (4-second sample)</button>
+      </div>
       <div id="local-provider-status" style="margin-top:8px;font-size:12px;color:#666;"></div>
     `;
     scroll.appendChild(section);
@@ -306,6 +309,60 @@
         const sttHint = getCfg('sttProvider') === 'avalai' ? 'Avalai STT key is checked when recording.' : (!getCfg('sttBase') ? 'Enter the actual STT Base URL before transcribing.' : 'STT is tested on the first recording.');
         status.textContent = 'OK — LLM replied “' + llmSample.slice(0,60) + '”; TTS returned ' + Math.round(ttsSample.size/1024) + ' KB audio. ' + sttHint;
       } catch (error) { status.textContent = 'Error: ' + error.message; console.error('Local Provider 3 test failed:', error); }
+    });
+
+    const sttTestButton = document.getElementById('local-stt-test');
+    sttTestButton?.addEventListener('click', async () => {
+      const status = document.getElementById('local-provider-status');
+      const fields = {
+        apiMode: document.getElementById('local-api-mode'),
+        llmBase: document.getElementById('local-llm-base-url'),
+        llmModel: document.getElementById('local-llm-model'),
+        llmApiKey: document.getElementById('local-llm-api-key'),
+        ttsBase: document.getElementById('local-tts-base-url'),
+        ttsModel: document.getElementById('local-tts-model'),
+        ttsApiKey: document.getElementById('local-tts-api-key'),
+        ttsVoice: document.getElementById('local-tts-voice'),
+        ttsFormat: document.getElementById('local-tts-format'),
+        sttProvider: document.getElementById('local-stt-provider'),
+        sttBase: document.getElementById('local-stt-base-url'),
+        sttApiKey: document.getElementById('local-stt-api-key'),
+        sttModel: document.getElementById('local-stt-model'),
+        sttLanguage: document.getElementById('local-stt-language')
+      };
+      Object.entries(fields).forEach(([key, element]) => { if (element) setCfg(key, element.value); });
+      let stream = null;
+      sttTestButton.disabled = true;
+      try {
+        await syncProxyConfig();
+        if (getCfg('sttProvider') !== 'avalai' && getCfg('apiMode') === 'direct' && !getCfg('sttBase')) {
+          throw new Error('Enter the STT Base URL first.');
+        }
+        if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+          throw new Error('Microphone recording requires HTTPS or localhost in a supported browser.');
+        }
+        status.textContent = 'Recording for 4 seconds. Speak a short test sentence now…';
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        const recorder = makeRealtimeRecorder(stream);
+        const chunks = [];
+        const stopped = new Promise((resolve, reject) => {
+          recorder.ondataavailable = event => { if (event.data?.size) chunks.push(event.data); };
+          recorder.onerror = event => reject(event.error || new Error('Microphone recorder failed.'));
+          recorder.onstop = resolve;
+          recorder.start(200);
+          setTimeout(() => { if (recorder.state !== 'inactive') recorder.stop(); }, 4000);
+        });
+        await stopped;
+        const sample = new Blob(chunks, { type: recorder.mimeType || chunks[0]?.type || 'audio/webm' });
+        const transcript = await localSTT(sample, window.WORDLENS_APP || null);
+        status.textContent = 'STT OK — recognized: ' + transcript;
+      } catch (error) {
+        status.textContent = 'STT test failed: ' + error.message;
+        console.error('STT connection test failed:', error);
+      } finally {
+        if (stream) stream.getTracks().forEach(track => track.stop());
+        sttTestButton.disabled = false;
+      }
     });
   };
 
@@ -509,7 +566,7 @@
       finally{if(this.messageInput){this.messageInput.placeholder=previousPlaceholder;this.messageInput.disabled=false;}}
     };
     const originalBindEvents=AIChatApp.prototype.bindEvents;
-    AIChatApp.prototype.bindEvents=function(){originalBindEvents.call(this);this.realtimeBtn=document.getElementById('realtime-btn');this.realtimeStatus=document.getElementById('realtime-status');this.realtimeSession=null;this.realtimeStarting=false;
+    AIChatApp.prototype.bindEvents=function(){originalBindEvents.call(this);window.WORDLENS_APP=this;this.realtimeBtn=document.getElementById('realtime-btn');this.realtimeStatus=document.getElementById('realtime-status');this.realtimeSession=null;this.realtimeStarting=false;
       this.realtimeBtn?.addEventListener('click',()=>{if(this.realtimeSession)this.stopRealtimeConversation();else this.startRealtimeConversation();});
     };
     AIChatApp.prototype.validateRealtimeConfiguration = async function() {
