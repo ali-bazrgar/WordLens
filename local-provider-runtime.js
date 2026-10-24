@@ -453,7 +453,10 @@
         .replace(/\s+/g, ' ').trim();
       if (!normalized) return true;
       if (NON_SPEECH_TRANSCRIPTS.has(normalized)) return true;
-      return /^(?:(?:the )?sound of )?(?:a )?(?:blank audio|silence|no speech|background noise|keyboard(?: typing| clicking)?|typing(?: sound)?|cough(?:ing)?|sigh(?:ing)?|laugh(?:ing|ter)?|heavy breathing|static|applause|footsteps|beep(?:ing)?)$/.test(normalized);
+      return /^(?:(?:(?:the|a|some|someone|there is|you can hear) )?(?:(?:sound|audio) of )?)?(?:a )?(?:blank audio|silence|no speech|background noise|keyboard(?: typing| clicking| sounds?)?(?: on (?:a )?keyboard)?|typing(?: on (?:a )?keyboard)?(?: sound)?|cough(?:ing)?|someone coughing|sigh(?:ing)?|laugh(?:ing|ter)?|heavy breathing|static|applause|footsteps|beep(?:ing)?)(?: sound| sounds| noise| is audible| in the background)?$/.test(normalized)
+        || /^(?:blank audio\s*){2,}$/.test(normalized)
+        || /^(?:صدای )?(?:کیبورد|سرفه|سرفه کردن|سکوت|نویز)(?: کردن)?$/.test(normalized)
+        || /^(?:صدای کیبورد|صدای سرفه|صدای تایپ|تایپ کردن)$/.test(normalized);
     };
     const readTranscript = (responseText) => {
       let data;
