@@ -337,6 +337,8 @@ class AIChatApp {
 
     this.leitnerQueue = [];
     this.currentCard = null;
+    this.leitnerReviewSessionId = 0;
+    this.leitnerLearningTimers = new Set();
   this.currentLeitnerScope = this.getGlobalScope();
   this.leitnerDueCache = new Map();
   this.currentScopeCards = [];
@@ -3904,7 +3906,15 @@ Be thorough and comprehensive.`;
     }
   }
 
+  beginLeitnerReviewSession() {
+    this.leitnerReviewSessionId = (this.leitnerReviewSessionId || 0) + 1;
+    if (!this.leitnerLearningTimers) this.leitnerLearningTimers = new Set();
+    this.leitnerLearningTimers.forEach(timer => clearTimeout(timer));
+    this.leitnerLearningTimers.clear();
+  }
+
   async openLeitnerModal(chatId = null, scopeOverride = null) {
+    this.beginLeitnerReviewSession();
     this.leitnerModal.classList.remove("hidden");
     this.leitnerCardContainer.classList.remove('hidden');
     this.leitnerFinishedScreen.classList.add('hidden');
@@ -3992,6 +4002,7 @@ Be thorough and comprehensive.`;
   
   // Quick review for a single card
   async startQuickReview(card) {
+    this.beginLeitnerReviewSession();
     this.leitnerModal.classList.remove("hidden");
     this.leitnerCardContainer.classList.remove('hidden');
     this.leitnerFinishedScreen.classList.add('hidden');
@@ -4038,6 +4049,7 @@ Be thorough and comprehensive.`;
   }
 
   closeLeitnerModal() {
+    this.beginLeitnerReviewSession();
     this.leitnerModal.classList.add("hidden");
     this.currentCard = null;
     this.leitnerQueue = [];
@@ -4102,9 +4114,8 @@ Be thorough and comprehensive.`;
     }
   }
   
-  // FSRS-6 default parameters from Open Spaced Repetition.
-  // The 90% retention target and exact fractional interval are shared by
-  // the preview labels and the actual saved due timestamp.
+  // FSRS-6 defaults: 90% desired retention, 1m/10m learning steps,
+  // a 10m relearning step, full-day review intervals and a 36,500-day limit.
   getFSRSParameters() {
     return [0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001, 1.8722, 0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425, 0.0912, 0.0658, 0.1542];
   }
@@ -4116,8 +4127,7 @@ Be thorough and comprehensive.`;
   }
   calculateFSRS(card, grade, now = new Date()) {
     const w = this.getFSRSParameters();
-    const retention = 0.9;
-    const msPerDay = 86400000;
+    const retention = 0.9, msPerDay = 86400000;
     const nowDate = now instanceof Date ? now : new Date(now);
     const nowMs = Number.isNaN(nowDate.getTime()) ? Date.now() : nowDate.getTime();
     const rawStability = Number(card?.stability);
@@ -4144,21 +4154,22 @@ Be thorough and comprehensive.`;
       elapsedDays = Math.max(0, (nowMs - lastReviewedMs) / msPerDay);
       const factor = Math.pow(0.9, -1 / w[20]) - 1;
       retrievability = Math.pow(1 + factor * elapsedDays / Math.max(stability, 0.1), -w[20]);
-      const previousStability = stability;
-      const previousDifficulty = difficulty;
+      const previousStability = stability, previousDifficulty = difficulty;
       const deltaDifficulty = -w[6] * (grade - 3);
       const dampedDifficulty = difficulty + deltaDifficulty * ((10 - difficulty) / 9);
       const easyDifficulty = w[4] - Math.exp(w[5] * 3) + 1;
       difficulty = this.clampFSRS(w[7] * easyDifficulty + (1 - w[7]) * dampedDifficulty, 1, 10);
       if (elapsedDays < 1) {
-        stability = stability * Math.exp(w[17] * (grade - 3 + w[18])) * Math.pow(stability, -w[19]);
-        if (grade >= 3) stability = Math.max(stability, previousStability);
+        let increase = Math.exp(w[17] * (grade - 3 + w[18])) * Math.pow(stability, -w[19]);
+        if (grade >= 2) increase = Math.max(increase, 1);
+        stability *= increase;
       } else if (grade === 1) {
-        const forgotten = w[11] * Math.pow(previousDifficulty, -w[12]) *
+        const longTermForget = w[11] * Math.pow(previousDifficulty, -w[12]) *
           (Math.pow(stability + 1, w[13]) - 1) * Math.exp(w[14] * (1 - retrievability));
-        stability = Math.min(stability, Math.max(0.01, forgotten));
+        const shortTermForget = stability / Math.exp(w[17] * w[18]);
+        stability = Math.min(longTermForget, shortTermForget);
       } else {
-        const multiplier = grade === 2 ? w[15] : grade === 4 ? w[16] : 1;
+        const multiplier = (grade === 2 ? w[15] : 1) * (grade === 4 ? w[16] : 1);
         const increase = Math.exp(w[8]) * (11 - previousDifficulty) * Math.pow(stability, -w[9]) *
           (Math.exp(w[10] * (1 - retrievability)) - 1) * multiplier;
         stability = Math.max(stability, stability * (increase + 1));
@@ -4167,8 +4178,59 @@ Be thorough and comprehensive.`;
     stability = this.clampFSRS(Number.isFinite(stability) ? stability : 0.1, 0.01, 36500);
     difficulty = this.clampFSRS(Number.isFinite(difficulty) ? difficulty : 5, 1, 10);
     const factor = Math.pow(0.9, -1 / w[20]) - 1;
-    const interval = this.clampFSRS(stability * (Math.pow(retention, -1 / w[20]) - 1) / factor, 0.01, 36500);
-    return { stability, difficulty, interval, retrievability, elapsedDays, fsrsVersion: 6 };
+    const rawInterval = stability * (Math.pow(retention, -1 / w[20]) - 1) / factor;
+    const interval = this.clampFSRS(Math.round(rawInterval), 1, 36500);
+    return { stability, difficulty, interval, rawInterval, retrievability, elapsedDays, fsrsVersion: 6 };
+  }
+  calculateFSRSSchedule(card, rating, now = new Date()) {
+    const grade = Number(rating);
+    const memory = this.calculateFSRS(card, grade, now);
+    const learningSteps = [60000, 600000], relearningSteps = [600000];
+    const state = ['new', 'learning', 'relearning'].includes(card?.status)
+      ? card.status
+      : ((Number(card?.repetitions) || 0) === 0 ? 'new' : 'review');
+    const step = Number.isInteger(card?.learningStep) && card.learningStep >= 0 ? card.learningStep : 0;
+    let nextStatus = 'review', nextLearningStep = null;
+    let intervalMs = memory.interval * 86400000, scheduleKind = 'review';
+    const graduate = () => {
+      nextStatus = 'review'; nextLearningStep = null; scheduleKind = 'review';
+      intervalMs = memory.interval * 86400000;
+    };
+    const putOnStep = (steps, index, targetState = (state === 'relearning' ? 'relearning' : 'learning')) => {
+      nextStatus = targetState;
+      nextLearningStep = index; scheduleKind = nextStatus; intervalMs = steps[index];
+    };
+
+    if (state === 'new' || state === 'learning') {
+      if (grade === 1) putOnStep(learningSteps, 0);
+      else if (step >= learningSteps.length) graduate();
+      else if (grade === 2) {
+        nextStatus = 'learning'; nextLearningStep = step; scheduleKind = 'learning';
+        intervalMs = step === 0 && learningSteps.length >= 2
+          ? (learningSteps[0] + learningSteps[1]) / 2
+          : learningSteps[Math.min(step, learningSteps.length - 1)];
+      } else if (grade === 3) {
+        if (step + 1 >= learningSteps.length) graduate();
+        else putOnStep(learningSteps, step + 1);
+      } else graduate();
+    } else if (state === 'review') {
+      if (grade === 1) putOnStep(relearningSteps, 0, 'relearning');
+      else graduate();
+    } else if (state === 'relearning') {
+      if (grade === 1) putOnStep(relearningSteps, 0);
+      else if (step >= relearningSteps.length) graduate();
+      else if (grade === 2) {
+        nextStatus = 'relearning'; nextLearningStep = step; scheduleKind = 'relearning';
+        intervalMs = step === 0 && relearningSteps.length === 1
+          ? relearningSteps[0] * 1.5
+          : relearningSteps[Math.min(step, relearningSteps.length - 1)];
+      } else if (grade === 3) {
+        if (step + 1 >= relearningSteps.length) graduate();
+        else putOnStep(relearningSteps, step + 1);
+      } else graduate();
+    }
+    intervalMs = Math.max(1000, intervalMs);
+    return { ...memory, interval: intervalMs / 86400000, intervalMs, nextStatus, nextLearningStep, scheduleKind };
   }
   formatInterval(days) {
     const interval = Number(days);
@@ -4187,8 +4249,7 @@ Be thorough and comprehensive.`;
   }
   updateRatingButtons() {
     if (!this.currentCard) return;
-    const card = this.currentCard;
-    const now = new Date();
+    const card = this.currentCard, now = new Date();
     const outcomes = [
       { rating: 1, button: this.ratingAgainBtn, label: 'Again', shortcut: '1' },
       { rating: 2, button: this.ratingHardBtn, label: 'Hard', shortcut: '2' },
@@ -4197,15 +4258,12 @@ Be thorough and comprehensive.`;
     ];
     outcomes.forEach(({ rating, button, label, shortcut }) => {
       if (!button) return;
-      const result = this.calculateFSRS(card, rating, now);
+      const result = this.calculateFSRSSchedule(card, rating, now);
       const intervalLabel = this.formatInterval(result.interval);
       button.replaceChildren();
-      const title = document.createElement('span');
-      title.className = 'rating-label'; title.textContent = label;
-      const schedule = document.createElement('span');
-      schedule.className = 'rating-interval'; schedule.textContent = 'in ' + intervalLabel;
-      const key = document.createElement('kbd');
-      key.className = 'rating-shortcut'; key.textContent = shortcut;
+      const title = document.createElement('span'); title.className = 'rating-label'; title.textContent = label;
+      const schedule = document.createElement('span'); schedule.className = 'rating-interval'; schedule.textContent = 'in ' + intervalLabel;
+      const key = document.createElement('kbd'); key.className = 'rating-shortcut'; key.textContent = shortcut;
       button.append(title, schedule, key);
       button.title = label + ': next review in ' + intervalLabel;
       button.setAttribute('aria-label', label + ', next review in ' + intervalLabel + ', shortcut ' + shortcut);
@@ -4215,31 +4273,44 @@ Be thorough and comprehensive.`;
   }
   async rateCard(rating) {
     if (!this.currentCard || ![1, 2, 3, 4].includes(rating)) return;
-    const reviewedAt = new Date();
-    const result = this.calculateFSRS(this.currentCard, rating, reviewedAt);
-    const previousReviews = Number.isFinite(this.currentCard.repetitions) ? this.currentCard.repetitions : 0;
-    const priorStability = Number.isFinite(this.currentCard.stability) && this.currentCard.stability > 0;
-    const previousLapses = Number.isFinite(this.currentCard.lapses) ? this.currentCard.lapses : 0;
-    const nextDueDate = new Date(reviewedAt.getTime() + result.interval * 86400000);
+    const reviewedAt = new Date(), cardAtRatingTime = this.currentCard;
+    const result = this.calculateFSRSSchedule(cardAtRatingTime, rating, reviewedAt);
+    const previousReviews = Number.isFinite(cardAtRatingTime.repetitions) ? cardAtRatingTime.repetitions : 0;
+    const previousLapses = Number.isFinite(cardAtRatingTime.lapses) ? cardAtRatingTime.lapses : 0;
+    const oldState = ['new', 'learning', 'relearning'].includes(cardAtRatingTime.status)
+      ? cardAtRatingTime.status : (previousReviews === 0 ? 'new' : 'review');
+    const nextDueDate = new Date(reviewedAt.getTime() + result.intervalMs);
     const updatedCard = {
-      ...this.currentCard,
+      ...cardAtRatingTime,
       repetitions: previousReviews + 1,
       interval: result.interval,
-      easeFactor: this.currentCard.easeFactor || 2.5,
+      easeFactor: cardAtRatingTime.easeFactor || 2.5,
       dueDate: nextDueDate.toISOString(),
       lastReviewed: reviewedAt.toISOString(),
       fsrsVersion: 6,
       stability: result.stability,
       difficulty: result.difficulty,
-      lapses: previousLapses + (rating === 1 && priorStability ? 1 : 0),
-      status: result.interval < 1 ? 'learning' : 'review'
+      lapses: previousLapses + (rating === 1 && oldState === 'review' ? 1 : 0),
+      status: result.nextStatus,
+      learningStep: result.nextLearningStep
     };
     await this.db.set(this.LEITNER_STORE, updatedCard);
-    await this.refreshLeitnerDueCacheForWord(this.currentCard.word, this.currentLeitnerScope);
+    await this.refreshLeitnerDueCacheForWord(cardAtRatingTime.word, this.currentLeitnerScope);
+    if (result.scheduleKind === 'learning' || result.scheduleKind === 'relearning') {
+      const sessionId = this.leitnerReviewSessionId;
+      let timer;
+      timer = setTimeout(() => {
+        this.leitnerLearningTimers?.delete(timer);
+        if (sessionId !== this.leitnerReviewSessionId || this.leitnerModal.classList.contains('hidden')) return;
+        if (!this.leitnerQueue.some(card => card.id === updatedCard.id)) this.leitnerQueue.push(updatedCard);
+        if (!this.leitnerFinishedScreen.classList.contains('hidden')) this.showNextCard();
+      }, Math.max(1, result.intervalMs));
+      this.leitnerLearningTimers.add(timer);
+    }
     this.showNextCard();
   }
 
-    // --- Import/Export ---
+  // --- Import/Export ---
   showImportTextModal() { this.importTextModal.classList.remove("hidden"); }
   hideImportTextModal() { this.importTextModal.classList.add("hidden"); }
 
