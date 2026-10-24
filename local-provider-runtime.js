@@ -1470,10 +1470,12 @@
     AIChatApp.prototype.processRealtimeAudio=async function(audioBlob,session,captureId){
       let failed=false;
       try{
+        // Do not start STT/another model job until the interrupted LLM/TTS
+        // turn has unwound and released the shared loading lock.
+        if(session.interruptedTurn&&session.turnSettled)await session.turnSettled;
+        if(!session.active||this.realtimeSession!==session)return;
         realtimeSetStatus(this,'Transcribing your turn…','processing');
         const transcript=await localSTT(audioBlob,this);
-        if(!session.active||this.realtimeSession!==session)return;
-        if(session.interruptedTurn&&session.turnSettled)await session.turnSettled;
         if(!session.active||this.realtimeSession!==session)return;
         if(!transcript){
           session.interruptedTurn=false;
