@@ -3683,6 +3683,89 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
         const meaningData = await this.getWordMeaning(word, { forceRefresh });
         if (!newPopup.isConnected || requestVersion !== meaningRequestVersion) return;
         renderMeaningData(meaningData);
+
+        // Show the accurate Persian meanings immediately. If either English
+        // related-word list is missing, fill only that list in the background.
+        const popupError = !Array.isArray(meaningData?.meanings) ||
+          !meaningData.meanings.length ||
+          /^(?:error|خطا)$/i.test(String(meaningData.meanings[0]?.type ?? '').trim());
+        if (!popupError) {
+          const popupTerms = value => {
+            const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[,;\n]/g) : [];
+            const seen = new Set();
+            return list.map(item => String(typeof item === 'object' && item !== null
+              ? (item.word ?? item.term ?? item.text ?? '') : item ?? '').trim())
+              .filter(item => /^[A-Za-z][A-Za-z\s'-]*$/.test(item))
+              .filter(item => {
+                const key = item.toLowerCase();
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+              }).slice(0, 3);
+          };
+          const synonyms = popupTerms(meaningData.synonyms ?? meaningData.synonym ?? meaningData.near_synonyms);
+          const antonyms = popupTerms(meaningData.antonyms ?? meaningData.antonym ?? meaningData.opposites);
+          const needSynonyms = synonyms.length === 0;
+          const needAntonyms = antonyms.length === 0;
+          if (needSynonyms || needAntonyms) {
+            if (needSynonyms) synonymsListEl.replaceChildren(Object.assign(document.createElement('span'), {
+              className: 'synonym-item',
+              textContent: 'Finding English synonyms…'
+            }));
+            if (needAntonyms) antonymsListEl.replaceChildren(Object.assign(document.createElement('span'), {
+              className: 'antonym-item',
+              textContent: 'Finding English antonyms…'
+            }));
+
+            if (!(this._wordLensRelatedTermsInFlight instanceof Map)) this._wordLensRelatedTermsInFlight = new Map();
+            const requestKey = String(word ?? '').trim().toLowerCase() + '|s' + Number(needSynonyms) + '|a' + Number(needAntonyms);
+            let relatedRequest = this._wordLensRelatedTermsInFlight.get(requestKey);
+            if (!relatedRequest) {
+              relatedRequest = Promise.resolve().then(() =>
+                this.getWordRelatedTerms(word, { needSynonyms, needAntonyms })
+              );
+              this._wordLensRelatedTermsInFlight.set(requestKey, relatedRequest);
+              relatedRequest.then(() => {
+                if (this._wordLensRelatedTermsInFlight?.get(requestKey) === relatedRequest) {
+                  this._wordLensRelatedTermsInFlight.delete(requestKey);
+                }
+              }, () => {
+                if (this._wordLensRelatedTermsInFlight?.get(requestKey) === relatedRequest) {
+                  this._wordLensRelatedTermsInFlight.delete(requestKey);
+                }
+              });
+            }
+
+            relatedRequest.then(related => {
+              if (!newPopup.isConnected || requestVersion !== meaningRequestVersion) return;
+              const extraSynonyms = popupTerms(related?.synonyms ?? related?.synonym ?? related?.near_synonyms);
+              const extraAntonyms = popupTerms(related?.antonyms ?? related?.antonym ?? related?.opposites);
+              const finalSynonyms = synonyms.length ? synonyms : extraSynonyms;
+              const finalAntonyms = antonyms.length ? antonyms : extraAntonyms;
+              renderWordList(synonymsListEl, finalSynonyms, 'synonym-item');
+              renderWordList(antonymsListEl, finalAntonyms, 'antonym-item');
+
+              if (finalSynonyms.length || finalAntonyms.length) {
+                const updatedMeaningData = {
+                  ...meaningData,
+                  synonyms: finalSynonyms,
+                  antonyms: finalAntonyms
+                };
+                this.db.set('word_meanings', {
+                  word: String(word ?? '').trim().toLowerCase(),
+                  promptVersion: window.WORDLENS_WORD_MEANING_PROMPT_VERSION,
+                  value: updatedMeaningData
+                }).catch(error => console.debug('Related-word cache update failed:', error));
+              }
+            }).catch(error => {
+              console.debug('Background related-word request failed:', error);
+              if (newPopup.isConnected && requestVersion === meaningRequestVersion) {
+                renderWordList(synonymsListEl, synonyms, 'synonym-item');
+                renderWordList(antonymsListEl, antonyms, 'antonym-item');
+              }
+            });
+          }
+        }
       } catch (error) {
         console.error("Failed to load word meaning:", error);
         if (!newPopup.isConnected || requestVersion !== meaningRequestVersion) return;
