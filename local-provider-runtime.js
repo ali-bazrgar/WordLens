@@ -5,7 +5,7 @@
   const DEFAULTS = Object.freeze({
     apiMode: 'proxy',
     llmBase: 'http://127.0.0.1:8080',
-    llmModel: 'hy-mt2-1.8b-en-fa',
+    llmModel: 'qwen3.5-0.8b',
     llmApiKey: '',
     ttsBase: 'http://127.0.0.1:8082',
     ttsApiKey: '',
@@ -52,6 +52,15 @@
   const setCfg = (key, value) => {
     localStorage.setItem('wordlens_local_' + key, (value ?? '').toString().trim());
   };
+
+  // Migrate only the old built-in model default, leaving deliberately chosen IDs intact.
+  const LOCAL_LLM_DEFAULTS_VERSION = 'wordlens_local_qwen35_default_v1';
+  if (localStorage.getItem(LOCAL_LLM_DEFAULTS_VERSION) !== '1') {
+    const savedModel = (localStorage.getItem('wordlens_local_llmModel') || '').trim();
+    const previousBuiltInModels = new Set(['', 'hy-mt2-1.8b-en-fa', 'Hy-MT2-1.8B-2Bit']);
+    if (previousBuiltInModels.has(savedModel)) setCfg('llmModel', DEFAULTS.llmModel);
+    localStorage.setItem(LOCAL_LLM_DEFAULTS_VERSION, '1');
+  }
 
   // One-time migration from WordLens' former initial Provider 1 defaults.
   // Keep an explicitly selected Provider 2 or Provider 3 unchanged.
@@ -215,6 +224,7 @@
     const apiKey = getCfg('llmApiKey');
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
     const parentSignal = options?.signal;
+    const useStream = options?.stream === true;
     const controller = new AbortController();
     let timedOut = false;
     const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 180000);
@@ -224,13 +234,21 @@
     let response;
     let responseText;
     try {
+      const requestBody = { model, messages, ...extra };
+      if (useStream) {
+        requestBody.stream = true;
+        // Qwen3.5 reasoning is disabled by the configured llama-server launch flags.
+        // Avoid sending unsupported, model-specific fields to other OpenAI-compatible servers.
+      }
       response = await fetchWithNetworkDiagnostics(base + '/chat/completions', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ model, messages, ...extra }),
+        body: JSON.stringify(requestBody),
         signal: controller.signal,
         cache: 'no-store'
       }, 'LLM');
+      // With stream=true, aborting this pending body read closes the SSE request
+      // so the local proxy can cancel upstream inference instead of draining tokens.
       responseText = await response.text();
     } catch (error) {
       if (parentSignal?.aborted) {
@@ -249,13 +267,46 @@
     if (!response.ok) {
       throw new Error('OpenAI-compatible LLM API error: ' + response.status + ', ' + responseText);
     }
-    let data;
-    try { data = JSON.parse(responseText); }
-    catch (_) { throw new Error('LLM server returned invalid JSON instead of a chat completion.'); }
-    const rawContent = data?.choices?.[0]?.message?.content;
-    const content = typeof rawContent === 'string' ? rawContent : Array.isArray(rawContent)
-      ? rawContent.map(part => typeof part === 'string' ? part : (part?.text || '')).join('') : '';
-    if (!content.trim()) throw new Error('OpenAI-compatible LLM returned an empty response.');
+
+    const asText = value => typeof value === 'string' ? value : Array.isArray(value)
+      ? value.map(part => typeof part === 'string' ? part : (part?.text || '')).join('') : '';
+    let content = '';
+    let lastChoice = null;
+    if (useStream && /(^|\n)data:/m.test(responseText)) {
+      // OpenAI-compatible SSE: collect text deltas while ignoring heartbeats and [DONE].
+      for (const line of responseText.split(/\r?\n/)) {
+        const trimmed = line.trimStart();
+        if (!trimmed.startsWith('data:')) continue;
+        const payloadText = trimmed.slice(5).trim();
+        if (!payloadText || payloadText === '[DONE]') continue;
+        let payload;
+        try { payload = JSON.parse(payloadText); } catch (_) { continue; }
+        if (payload?.error?.message) throw new Error(String(payload.error.message));
+        const choice = payload?.choices?.[0];
+        if (!choice) continue;
+        lastChoice = choice;
+        const delta = choice?.delta;
+        const piece = delta?.content ?? choice?.message?.content ?? choice?.text ?? payload?.content;
+        content += asText(piece);
+      }
+    } else {
+      // Some OpenAI-compatible services ignore stream=true; keep them usable.
+      let data;
+      try { data = JSON.parse(responseText); }
+      catch (_) { throw new Error('LLM server returned neither a valid chat-completion JSON response nor an SSE stream.'); }
+      lastChoice = data?.choices?.[0] || null;
+      content = asText(lastChoice?.message?.content ?? lastChoice?.text ?? data?.content);
+    }
+
+    if (!content.trim()) {
+      const finishReason = lastChoice?.finish_reason || lastChoice?.finishReason;
+      const suffix = finishReason ? ' (finish reason: ' + finishReason + ')' : '';
+      const reasoningOnly = Boolean(lastChoice?.message?.reasoning_content || lastChoice?.delta?.reasoning_content);
+      throw new Error('OpenAI-compatible LLM returned no final text' + suffix +
+        (reasoningOnly
+          ? '. The model returned reasoning but no answer text; verify llama-server was started with --reasoning off.'
+          : '. Check the model alias and llama-server output.'));
+    }
     return content;
   };
 
@@ -869,7 +920,7 @@
         ...history,
         { role: 'user', content: String(message ?? '') }
       ];
-      return localCompletion(messages, { temperature: 0.7, max_tokens: 8192 }, requestOptions);
+      return localCompletion(messages, { temperature: 0.7, max_tokens: requestOptions?.realtime ? 768 : 8192 }, requestOptions);
     };
 
     AIChatApp.prototype.translateTextOpenRouter = async function(text, options = {}) {
@@ -1678,8 +1729,8 @@
         session.state='thinking';
         realtimeSetStatus(this,'Thinking… speak any time to interrupt.','processing');
         const answer=this.chatProvider==='openrouter'
-          ? await this.callOpenRouterChatAPI(transcript,{signal:controller.signal})
-          : await this.callChatAPI(transcript);
+          ? await this.callOpenRouterChatAPI(transcript,{signal:controller.signal,stream:true,realtime:true})
+          : await this.callChatAPI(transcript,this.currentChatId,{signal:controller.signal});
         if(session.state==='barge-candidate'&&session.bargeCandidatePromise)await session.bargeCandidatePromise;
         if(!session.active||controller.signal.aborted||session.interruptedTurn){loadingWrapper.remove();return;}
         loadingWrapper.remove();
