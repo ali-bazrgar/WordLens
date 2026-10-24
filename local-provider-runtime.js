@@ -203,6 +203,7 @@
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 180000);
     let response;
+    let responseText;
     try {
       response = await fetchWithNetworkDiagnostics(base + '/chat/completions', {
         method: 'POST',
@@ -211,19 +212,22 @@
         signal: controller.signal,
         cache: 'no-store'
       }, 'LLM');
+      // Keep the timeout active while reading the body, not merely until headers arrive.
+      responseText = await response.text();
     } catch (error) {
       if (controller.signal.aborted || error?.name === 'AbortError') {
-        throw new Error('LLM request timed out after 180 seconds. Check that the local model server is responsive and not occupied by another job.');
+        throw new Error('LLM request or response timed out after 180 seconds. Check that the local model server is responsive and not occupied by another job.');
       }
       throw error;
     } finally {
       clearTimeout(timeout);
     }
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error('OpenAI-compatible LLM API error: ' + response.status + ', ' + errorText);
+      throw new Error('OpenAI-compatible LLM API error: ' + response.status + ', ' + responseText);
     }
-    const data = await response.json();
+    let data;
+    try { data = JSON.parse(responseText); }
+    catch (_) { throw new Error('LLM server returned invalid JSON instead of a chat completion.'); }
     const rawContent = data?.choices?.[0]?.message?.content;
     const content = typeof rawContent === 'string' ? rawContent : Array.isArray(rawContent)
       ? rawContent.map(part => typeof part === 'string' ? part : (part?.text || '')).join('') : '';
@@ -770,6 +774,10 @@
         .filter(msg => msg.role !== 'system')
         .slice(-10)
         .map(msg => ({ role: msg.role === 'user' ? 'user' : 'assistant', content: msg.content }));
+      // sendMessage() already appends the user's message before calling the model.
+      // Avoid repeating that same final user message in the prompt.
+      const last = history[history.length - 1];
+      if (last?.role === 'user' && String(last.content ?? '') === String(message ?? '')) history.pop();
       return localCompletion(history.concat([{ role: 'user', content: message }]));
     };
 
