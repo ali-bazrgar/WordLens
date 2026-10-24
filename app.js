@@ -308,8 +308,8 @@ class AIChatApp {
     this.OPENROUTER_API_KEY = localStorage.getItem("openrouter_api_key");
     this.ELEVENLABS_API_KEY = localStorage.getItem("elevenlabs_api_key");
     this.ELEVENLABS_VOICE_ID = localStorage.getItem("elevenlabs_voice_id") || "";
-    this.chatProvider = localStorage.getItem("chat_provider") || "gemini";
-    this.ttsProvider = localStorage.getItem("tts_provider") || "gemini";
+    this.chatProvider = localStorage.getItem("chat_provider") || "openrouter";
+    this.ttsProvider = localStorage.getItem("tts_provider") || "elevenlabs";
     this.theme = localStorage.getItem("theme") || "light";
     this.fontSize = parseInt(localStorage.getItem("font_size")) || 14;
     this.boldText = localStorage.getItem("bold_text") === "true";
