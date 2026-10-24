@@ -325,11 +325,27 @@
       form.append('response_format', 'json');
       return form;
     };
-    const send = (url, includeModel = true) => fetchWithNetworkDiagnostics(url, {
-      method: 'POST',
-      headers,
-      body: createForm(includeModel)
-    }, 'STT transcription');
+    const send = async (url, includeModel = true) => {
+      const controller = new AbortController();
+      // Local Whisper may be CPU-bound; use a generous deadline but never leave
+      // the UI stuck on "Transcribing…" forever if the service stops responding.
+      const timeout = setTimeout(() => controller.abort(), 120000);
+      try {
+        return await fetchWithNetworkDiagnostics(url, {
+          method: 'POST',
+          headers,
+          body: createForm(includeModel),
+          signal: controller.signal
+        }, 'STT transcription');
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw new Error('STT transcription timed out after 120 seconds. Check that whisper.cpp is running, reachable at the configured STT URL, and not busy with another request.');
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
     const readTranscript = async (response) => {
       const responseText = await response.text();
       let data;
@@ -699,30 +715,173 @@
     };
 
     AIChatApp.prototype.getWordMeaningOpenRouter = async function(word) {
-      const lowerWord = word.toLowerCase().trim();
-      try {
-        const cached = await this.db.get('word_meanings', lowerWord);
-        if (cached) return cached.value;
-      } catch (error) {
-        console.error('Local dictionary cache error:', error);
+      const lowerWord = String(word ?? '').toLowerCase().trim();
+      if (!lowerWord) {
+        return { meanings: [{ text: 'No word selected.', type: 'Error' }], synonyms: [], antonyms: [] };
       }
-      const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.\nReturn ONLY valid JSON with this exact structure:\n{"meanings":[{"text":"Persian meaning","type":"Persian part of speech"}],"synonyms":["English word"],"antonyms":["English word"]}\nRequirements: meanings in Persian/Farsi; synonyms and antonyms in English only; no markdown; provide several common meanings and useful synonyms/antonyms.`;
-      try {
-        const raw = await localCompletion([{ role: 'user', content: prompt }], { temperature: 0.2 });
-        const normalized = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').replace(/,(\s*[}\]])/g, '$1');
-        const parsed = JSON.parse(normalized);
-        if (!Array.isArray(parsed.meanings)) throw new Error('Invalid dictionary JSON.');
-        const result = {
-          meanings: parsed.meanings.map(m => ({ text: String(m?.text ?? '').trim(), type: String(m?.type ?? '').trim() })).filter(m => m.text),
-          synonyms: Array.isArray(parsed.synonyms) ? parsed.synonyms.map(String).filter(v => /[A-Za-z]/.test(v) && !/[\u0600-\u06FF]/.test(v)) : [],
-          antonyms: Array.isArray(parsed.antonyms) ? parsed.antonyms.map(String).filter(v => /[A-Za-z]/.test(v) && !/[\u0600-\u06FF]/.test(v)) : []
+
+      const normalizeWordList = (value) => {
+        const items = Array.isArray(value)
+          ? value
+          : typeof value === 'string' ? value.split(/[,;\n]/g) : [];
+        const seen = new Set();
+        return items
+          .map(item => String(item ?? '').trim().replace(/^["'\s]+|["'\s]+$/g, ''))
+          .filter(item => /^[A-Za-z][A-Za-z\s'-]*$/.test(item))
+          .filter(item => {
+            const key = item.toLowerCase();
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .slice(0, 3);
+      };
+
+      const normalizeMeaningResult = (object) => {
+        if (!object || typeof object !== 'object' || !Array.isArray(object.meanings)) return null;
+        const meanings = object.meanings
+          .map(item => {
+            if (typeof item === 'string') return { text: item.trim(), type: '' };
+            return {
+              text: String(item?.text ?? item?.meaning ?? '').trim(),
+              type: String(item?.type ?? item?.part_of_speech ?? '').trim()
+            };
+          })
+          .filter(item => item.text && item.type.toLowerCase() !== 'error')
+          .filter(item => !/^(?:local provider 3 error|failed to parse meaning|request failed)/i.test(item.text))
+          .slice(0, 5);
+        if (!meanings.length) return null;
+        return {
+          meanings,
+          synonyms: normalizeWordList(object.synonyms),
+          antonyms: normalizeWordList(object.antonyms)
         };
-        if (!result.meanings.length) throw new Error('No meanings returned.');
-        await this.db.set('word_meanings', { word: lowerWord, value: result }).catch(() => {});
+      };
+
+      const parseJsonObject = (raw) => {
+        const text = String(raw ?? '').trim()
+          .replace(/^\uFEFF/, '')
+          .replace(/^\`\`\`(?:json)?\s*/i, '')
+          .replace(/\s*\`\`\`\s*$/i, '')
+          .replace(/,(\s*[}\]])/g, '$1');
+        const candidates = [text];
+        // Recover the first balanced JSON object while respecting quoted braces.
+        for (let start = 0; start < text.length; start++) {
+          if (text[start] !== '{') continue;
+          let depth = 0;
+          let inString = false;
+          let escaped = false;
+          for (let i = start; i < text.length; i++) {
+            const char = text[i];
+            if (inString) {
+              if (escaped) escaped = false;
+              else if (char === '\\') escaped = true;
+              else if (char === '"') inString = false;
+              continue;
+            }
+            if (char === '"') inString = true;
+            else if (char === '{') depth++;
+            else if (char === '}') {
+              depth--;
+              if (depth === 0) {
+                candidates.push(text.slice(start, i + 1).replace(/,(\s*[}\]])/g, '$1'));
+                break;
+              }
+            }
+          }
+        }
+        for (const candidate of candidates) {
+          try { return JSON.parse(candidate); } catch (_) {}
+        }
+        return null;
+      };
+
+      try {
+        // Normalize and cap previously cached values too, so old oversized
+        // dictionaries cannot bypass the new limits.
+        try {
+          const cached = await this.db.get('word_meanings', lowerWord);
+          const cachedResult = normalizeMeaningResult(cached?.value);
+          if (cachedResult) {
+            await this.db.set('word_meanings', { word: lowerWord, value: cachedResult }).catch(() => {});
+            return cachedResult;
+          }
+        } catch (error) {
+          console.debug('Local dictionary cache read failed:', error);
+        }
+
+        const wordJson = JSON.stringify(String(word));
+        const prompt =
+          'You are a precise English-to-Persian learner dictionary. Analyze only the English word or short expression below.\n' +
+          'WORD: ' + wordJson + '\n\n' +
+          'Return one JSON object only, with exactly these keys and no other text:\n' +
+          '{"meanings":[{"text":"معنی فارسی","type":"اسم/فعل/صفت/قید/حرف اضافه/حرف ربط/حرف ندا"},{"text":"معنی فارسی دوم","type":"نوع کلمه"}],"synonyms":["English synonym"],"antonyms":["English antonym"]}\n\n' +
+          'Rules (must follow):\n' +
+          '- meanings must contain 1 to 5 items, sorted from the most common/current meaning to less common meanings.\n' +
+          '- Each meaning.text must be Persian/Farsi. Do not write English explanations in meanings.\n' +
+          '- Each meaning.type must be a short Persian part-of-speech label.\n' +
+          '- synonyms must contain at most 3 distinct English words or short English phrases, closest matches first.\n' +
+          '- antonyms must contain at most 3 distinct English words or short English phrases, strongest opposites first. If none exists, use [].\n' +
+          '- Synonyms and antonyms must use Latin/English letters only; never put Persian words there.\n' +
+          '- Use JSON double quotes, valid escaping, arrays, commas and closing braces. No trailing commas, Markdown, code fences, comments or prose.';
+
+        const jsonOptions = {
+          temperature: 0,
+          max_tokens: 320,
+          response_format: { type: 'json_object' }
+        };
+        let raw;
+        try {
+          raw = await localCompletion([{ role: 'user', content: prompt }], jsonOptions);
+        } catch (error) {
+          // Some OpenAI-compatible servers/models do not implement response_format.
+          if (!/response.?format|json.?object|unsupported|unknown.*parameter|invalid.*parameter/i.test(error.message || '')) {
+            throw error;
+          }
+          raw = await localCompletion([{ role: 'user', content: prompt }], {
+            temperature: 0,
+            max_tokens: 320
+          });
+        }
+
+        let result = normalizeMeaningResult(parseJsonObject(raw));
+        if (!result) {
+          const repairPrompt =
+            'Correct the output below into valid JSON matching the schema and constraints. ' +
+            'Return ONLY JSON. meanings: 1-5 Persian translations ordered most common first. ' +
+            'synonyms: at most 3 English-only items. antonyms: at most 3 English-only items. ' +
+            'Required keys: meanings (array of objects with text and type), synonyms (array), antonyms (array).\n' +
+            'WORD: ' + wordJson + '\nINVALID OUTPUT:\n' + String(raw).slice(0, 1800);
+          const repair = await localCompletion([{ role: 'user', content: repairPrompt }], {
+            temperature: 0,
+            max_tokens: 320,
+            response_format: { type: 'json_object' }
+          }).catch(async error => {
+            if (!/response.?format|json.?object|unsupported|unknown.*parameter|invalid.*parameter/i.test(error.message || '')) throw error;
+            return localCompletion([{ role: 'user', content: repairPrompt }], { temperature: 0, max_tokens: 320 });
+          });
+          result = normalizeMeaningResult(parseJsonObject(repair));
+        }
+
+        if (!result) {
+          console.error('Local dictionary model returned invalid JSON:', String(raw).slice(0, 1200));
+          return {
+            meanings: [{ text: 'مدل خروجی معتبری تولید نکرد. دوباره روی کلمه کلیک کن.', type: 'خطا' }],
+            synonyms: [],
+            antonyms: []
+          };
+        }
+        await this.db.set('word_meanings', { word: lowerWord, value: result }).catch(error => {
+          console.debug('Local dictionary cache write failed:', error);
+        });
         return result;
       } catch (error) {
         console.error('Local Provider 3 dictionary error:', error);
-        return { meanings: [{ text: `Local Provider 3 error: ${error.message}`, type: 'Error' }], synonyms: [], antonyms: [] };
+        return {
+          meanings: [{ text: 'خطا در دریافت معنی: ' + (error?.message || String(error)), type: 'خطا' }],
+          synonyms: [],
+          antonyms: []
+        };
       }
     };
 
