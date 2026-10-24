@@ -4052,6 +4052,11 @@ Be thorough and comprehensive.`;
       this.showFinishedScreen();
       return;
     }
+
+    // A learning-step timer can make a card due after the session showed its
+    // finished screen. Restore the review UI before displaying that returned card.
+    this.leitnerFinishedScreen.classList.add('hidden');
+    this.leitnerCardContainer.classList.remove('hidden');
     this.currentCard = this.leitnerQueue.shift();
     
     // Update remaining count in stats
