@@ -1140,7 +1140,7 @@
   };
   const beginRealtimeSegmentRecorder = (app, session, now, initialVoiceMs = 0) => {
     const recorder = makeRealtimeRecorder(session.stream);
-    const capture = { chunks: [], voiceActiveMs: initialVoiceMs, discarded: false };
+    const capture = { id: (session.captureSequence = (session.captureSequence || 0) + 1), chunks: [], voiceActiveMs: initialVoiceMs, discarded: false };
     recorder.wordLensCapture = capture;
     session.recorder = recorder;
     session.speechStartedAt = now;
@@ -1171,7 +1171,7 @@
       }
       session.state = 'processing';
       realtimeSetStatus(app, 'Transcribing your turn…', 'processing');
-      app.processRealtimeAudio(blob, session);
+      app.processRealtimeAudio(blob, session, capture.id);
     };
     recorder.start(100);
     return recorder;
@@ -1351,7 +1351,7 @@
         const Context=window.AudioContext||window.webkitAudioContext;if(!Context)throw new Error('Web Audio is not supported by this browser.');
         audioContext=new Context();await audioContext.resume();const analyser=audioContext.createAnalyser();analyser.fftSize=2048;analyser.smoothingTimeConstant=0.15;
         const source=audioContext.createMediaStreamSource(stream);source.connect(analyser);
-        const session={active:true,stream,audioContext,analyser,source,frameId:0,recorder:null,chunks:[],state:'listening',noiseFloor:0.002,threshold:0.012,speechStartedAt:0,lastVoiceAt:0,voiceActiveMs:0,lastVADFrameAt:0,audio:null,audioStop:null,turnController:null,turnSettled:Promise.resolve(),resolveTurnSettled:null,interruptedTurn:false,bargeCandidateAt:0,bargeLastEnergyAt:0,bargeResumeState:'',bargeCooldownUntil:0,bargeThreshold:0};
+        const session={active:true,stream,audioContext,analyser,source,frameId:0,recorder:null,chunks:[],state:'listening',noiseFloor:0.002,threshold:0.012,speechStartedAt:0,lastVoiceAt:0,voiceActiveMs:0,lastVADFrameAt:0,audio:null,audioStop:null,turnController:null,turnSettled:Promise.resolve(),resolveTurnSettled:null,interruptedTurn:false,captureSequence:0,bargeCandidateAt:0,bargeLastEnergyAt:0,bargeResumeState:'',bargeCooldownUntil:0,bargeThreshold:0};
         this.realtimeSession=session;
         if(this.realtimeBtn){this.realtimeBtn.disabled=false;this.realtimeBtn.classList.add('active');this.realtimeBtn.setAttribute('aria-pressed','true');this.realtimeBtn.title='Stop live conversation';this.realtimeBtn.setAttribute('aria-label','Stop live conversation');}
         if(this.voiceBtn)this.voiceBtn.disabled=true;realtimeSetStatus(this,'Listening — speak naturally, then pause briefly when you finish a turn.','listening');this.tickRealtimeConversation(session);
@@ -1409,6 +1409,7 @@
           const threshold=session.bargeThreshold||Math.max(0.028,session.threshold*2.2);
           if(rms>threshold){
             session.bargeLastEnergyAt=now;
+            session.lastVoiceAt=now;
             if(zeroCrossingRate<0.30&&session.recorder?.wordLensCapture){
               session.recorder.wordLensCapture.voiceActiveMs+=frameDelta;
             }
@@ -1416,14 +1417,14 @@
           const candidateAge=now-session.bargeCandidateAt;
           const quietGap=now-session.bargeLastEnergyAt;
           const activeVoiceMs=session.recorder?.wordLensCapture?.voiceActiveMs||0;
-          if(candidateAge>=400&&activeVoiceMs>=300&&quietGap<=140){
+          if(candidateAge>=340&&activeVoiceMs>=250&&quietGap<=120){
             session.state='recording';
             session.interruptedTurn=true;
             session.bargeCandidateAt=0;
             if(session.turnController&&!session.turnController.signal.aborted)session.turnController.abort();
             if(session.audioStop)session.audioStop();
             realtimeSetStatus(this,'Interrupted — recording your turn…','recording');
-          }else if(quietGap>220||candidateAge>1200){
+          }else if(quietGap>180||candidateAge>1000){
             const recorder=session.recorder;
             if(recorder&&recorder.state!=='inactive'){
               if(recorder.wordLensCapture)recorder.wordLensCapture.discarded=true;
@@ -1466,7 +1467,7 @@
       }catch(error){console.error('Realtime voice activity detection error:',error);}
       if(session.active)session.frameId=requestAnimationFrame(()=>this.tickRealtimeConversation(session));
     };
-    AIChatApp.prototype.processRealtimeAudio=async function(audioBlob,session){
+    AIChatApp.prototype.processRealtimeAudio=async function(audioBlob,session,captureId){
       let failed=false;
       try{
         realtimeSetStatus(this,'Transcribing your turn…','processing');
@@ -1486,7 +1487,7 @@
         console.error('Realtime STT/turn processing failed:',error);
         if(session.active){realtimeSetStatus(this,'Voice turn failed: '+error.message,'error');this.showToast('Live conversation error: '+error.message,'error');}
       }finally{
-        if(session.active&&this.realtimeSession===session&&session.state==='processing'){
+        if(session.active&&this.realtimeSession===session&&session.state==='processing'&&(!captureId||session.captureSequence===captureId)){
           session.state='listening';
           if(session.lastError){realtimeSetStatus(this,session.lastError,'error');session.lastError='';}
           else if(!failed)realtimeSetStatus(this,'Listening — speak when ready.','listening');
