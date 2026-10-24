@@ -4196,8 +4196,8 @@ Be thorough and comprehensive.`;
       nextStatus = 'review'; nextLearningStep = null; scheduleKind = 'review';
       intervalMs = memory.interval * 86400000;
     };
-    const putOnStep = (steps, index) => {
-      nextStatus = state === 'relearning' ? 'relearning' : 'learning';
+    const putOnStep = (steps, index, targetState = (state === 'relearning' ? 'relearning' : 'learning')) => {
+      nextStatus = targetState;
       nextLearningStep = index; scheduleKind = nextStatus; intervalMs = steps[index];
     };
 
@@ -4214,7 +4214,7 @@ Be thorough and comprehensive.`;
         else putOnStep(learningSteps, step + 1);
       } else graduate();
     } else if (state === 'review') {
-      if (grade === 1) putOnStep(relearningSteps, 0);
+      if (grade === 1) putOnStep(relearningSteps, 0, 'relearning');
       else graduate();
     } else if (state === 'relearning') {
       if (grade === 1) putOnStep(relearningSteps, 0);
