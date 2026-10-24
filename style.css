@@ -2963,3 +2963,499 @@ body.theme-rgb-glass .btn-send:hover {
 @media (prefers-reduced-motion: reduce) {
   .messages-container { scroll-behavior: auto; }
 }
+
+
+/* ==========================================================================
+   WordLens chat Markdown — Obsidian-inspired reading experience
+   Scope is intentionally limited to rendered chat messages.
+   ========================================================================== */
+
+.message {
+  --markdown-rule-color: rgba(127, 138, 153, 0.24);
+  --markdown-soft-bg: rgba(127, 138, 153, 0.09);
+  --markdown-muted: rgba(127, 138, 153, 0.82);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* More deliberate rhythm and comfortable reading width. */
+.message > * {
+  max-width: 100%;
+}
+
+.message > :first-child {
+  margin-block-start: 0 !important;
+}
+
+.message > :last-child {
+  margin-block-end: 0 !important;
+}
+
+.message p {
+  line-height: 1.85;
+  text-align: start !important;
+  margin-block: 0.65em 1em;
+  overflow-wrap: anywhere;
+}
+
+.message p + p {
+  margin-block-start: 0.9em;
+}
+
+/* Heading hierarchy: restrained separators and a clear accent, like Obsidian. */
+.message h1,
+.message h2,
+.message h3,
+.message h4,
+.message h5,
+.message h6 {
+  color: inherit;
+  font-weight: 700;
+  line-height: 1.42;
+  letter-spacing: -0.015em;
+  text-align: start;
+  overflow-wrap: anywhere;
+  margin-block: 1.45em 0.55em;
+}
+
+.message h1 {
+  font-size: 1.7em !important;
+  padding-block-end: 0.42em;
+  border-bottom: 2px solid var(--markdown-rule-color);
+  box-shadow: inset 0 -1px 0 rgba(127, 138, 153, 0.08);
+}
+
+.message h2 {
+  font-size: 1.45em !important;
+  padding-inline-start: 0.62em;
+  border-inline-start: 3px solid var(--primary-color);
+  border-block-end: 1px solid var(--markdown-rule-color);
+  padding-block-end: 0.22em;
+}
+
+.message h3 {
+  font-size: 1.22em !important;
+  color: var(--primary-color);
+}
+
+.message h4 {
+  font-size: 1.1em !important;
+}
+
+.message h5 {
+  font-size: 1em !important;
+}
+
+.message h6 {
+  font-size: 0.94em !important;
+  opacity: 0.84;
+}
+
+/* Strong and emphasized text remain legible without overpowering paragraphs. */
+.message strong,
+.message b {
+  font-weight: 750;
+}
+
+.message em,
+.message i {
+  font-style: italic;
+}
+
+.message del {
+  opacity: 0.72;
+  text-decoration-thickness: 1.5px;
+}
+
+.message mark {
+  color: inherit;
+  background: rgba(250, 204, 21, 0.28);
+  border-radius: 0.22em;
+  padding-inline: 0.16em;
+}
+
+/* Links are identifiable without relying on color alone. */
+.message a {
+  color: var(--primary-color);
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+  text-decoration-color: currentColor;
+  overflow-wrap: anywhere;
+  border-radius: 2px;
+  transition: text-decoration-thickness 0.15s ease, opacity 0.15s ease;
+}
+
+.message a:hover {
+  text-decoration-thickness: 2px;
+  opacity: 0.86;
+}
+
+.message a:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 3px;
+}
+
+/* Lists: correct RTL/LTR indentation, cleaner spacing, and clear markers. */
+.message ul,
+.message ol {
+  margin-block: 0.75em 1em;
+  padding-inline-start: 1.65em;
+  padding-inline-end: 0.15em;
+  line-height: 1.8;
+  text-align: start;
+}
+
+.message li {
+  margin-block: 0.28em;
+  padding-inline-start: 0.12em;
+  line-height: 1.78;
+}
+
+.message li::marker {
+  color: var(--primary-color);
+  font-weight: 700;
+}
+
+.message li > p {
+  margin-block: 0.35em 0.55em;
+}
+
+.message li > ul,
+.message li > ol {
+  margin-block: 0.35em 0.55em;
+}
+
+.message input[type="checkbox"] {
+  accent-color: var(--primary-color);
+  vertical-align: middle;
+  margin-inline-end: 0.4em;
+}
+
+/* Quote block with a subtle surface instead of a large grey box. */
+.message blockquote {
+  margin-block: 1.1em;
+  margin-inline: 0;
+  padding: 0.72em 1em;
+  border: 0;
+  border-inline-start: 3px solid var(--primary-color);
+  border-radius: 9px;
+  background: var(--markdown-soft-bg);
+  color: inherit;
+  font-style: normal;
+}
+
+.message blockquote p {
+  margin-block: 0.2em;
+}
+
+.message blockquote p + p {
+  margin-block-start: 0.65em;
+}
+
+.message blockquote > :last-child {
+  margin-block-end: 0;
+}
+
+/* Inline code: compact, readable, and distinct from fenced blocks. */
+.message :not(pre) > code,
+.message p code,
+.message li code,
+.message td code,
+.message th code {
+  display: inline;
+  padding: 0.12em 0.38em;
+  border: 1px solid var(--markdown-rule-color);
+  border-radius: 5px;
+  background: var(--markdown-soft-bg);
+  color: inherit;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.9em !important;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* Fenced code blocks with a discreet label and safe horizontal scrolling. */
+.message pre {
+  position: relative;
+  direction: ltr;
+  text-align: left;
+  max-width: 100%;
+  min-width: 0;
+  margin-block: 1em;
+  padding: 2.6em 1em 1em;
+  overflow: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--markdown-rule-color);
+  border-radius: 11px;
+  background: var(--markdown-soft-bg);
+  color: inherit;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(127, 138, 153, 0.5) transparent;
+}
+
+.message pre::before {
+  content: "CODE BLOCK";
+  position: absolute;
+  inset-block-start: 0.72em;
+  inset-inline-start: 1em;
+  color: var(--markdown-muted);
+  font: 700 0.68em/1.2 "Inter", "Vazirmatn", sans-serif;
+  letter-spacing: 0.09em;
+  user-select: none;
+  pointer-events: none;
+}
+
+.message pre code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent !important;
+  color: inherit;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.9em !important;
+  line-height: 1.75;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+  box-shadow: none;
+}
+
+.message pre code::before,
+.message pre code::after {
+  content: none;
+}
+
+/* Horizontal rules and tables. Tables scroll inside their own width on phones. */
+.message hr {
+  border: 0;
+  height: 1px;
+  margin-block: 1.5em;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(127, 138, 153, 0.48),
+    transparent
+  );
+}
+
+.message table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin-block: 1em 1.2em;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--markdown-rule-color);
+  border-radius: 9px;
+  border-spacing: 0;
+  border-collapse: separate;
+  scrollbar-width: thin;
+}
+
+.message table th,
+.message table td {
+  min-width: 5.5em;
+  padding: 0.62em 0.8em;
+  border: 0;
+  border-inline-end: 1px solid var(--markdown-rule-color);
+  border-block-end: 1px solid var(--markdown-rule-color);
+  text-align: start;
+  vertical-align: top;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.message table th {
+  background: var(--markdown-soft-bg);
+  font-weight: 750;
+  white-space: normal;
+}
+
+.message table tr:last-child td {
+  border-block-end: 0;
+}
+
+.message table th:last-child,
+.message table td:last-child {
+  border-inline-end: 0;
+}
+
+.message table tbody tr:nth-child(even) {
+  background: rgba(127, 138, 153, 0.035);
+}
+
+/* Images and embedded media should never widen the chat layout. */
+.message img,
+.message video,
+.message iframe {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin-block: 0.9em;
+  border-radius: 9px;
+}
+
+.message img {
+  object-fit: contain;
+}
+
+.message figure {
+  max-width: 100%;
+  margin-inline: 0;
+}
+
+.message figcaption {
+  margin-block-start: 0.4em;
+  color: var(--markdown-muted);
+  font-size: 0.88em;
+  text-align: center;
+}
+
+/* Keyboard shortcuts and definition lists, when generated in Markdown/HTML. */
+.message kbd {
+  padding: 0.12em 0.42em;
+  border: 1px solid var(--markdown-rule-color);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--markdown-soft-bg);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.86em;
+}
+
+.message dl {
+  margin-block: 0.8em 1em;
+}
+
+.message dt {
+  margin-block-start: 0.75em;
+  font-weight: 750;
+}
+
+.message dd {
+  margin-inline-start: 1.4em;
+  color: inherit;
+}
+
+/* Keep Markdown visually balanced in every existing theme. */
+body.theme-dark .message,
+body.theme-rgb-glass .message {
+  --markdown-rule-color: rgba(168, 181, 204, 0.22);
+  --markdown-soft-bg: rgba(8, 12, 22, 0.26);
+  --markdown-muted: rgba(220, 228, 240, 0.72);
+}
+
+body.theme-light .message {
+  --markdown-rule-color: rgba(71, 85, 105, 0.2);
+  --markdown-soft-bg: rgba(71, 85, 105, 0.055);
+  --markdown-muted: rgba(71, 85, 105, 0.78);
+}
+
+body.theme-beige .message {
+  --markdown-rule-color: rgba(120, 91, 55, 0.2);
+  --markdown-soft-bg: rgba(120, 91, 55, 0.055);
+  --markdown-muted: rgba(95, 75, 54, 0.78);
+}
+
+/* User bubbles use a saturated gradient: preserve contrast in their code blocks. */
+.message.user pre {
+  background: rgba(12, 20, 38, 0.24);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.message.user :not(pre) > code,
+.message.user p code,
+.message.user li code {
+  background: rgba(12, 20, 38, 0.16);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+
+.message.user pre::before {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.message.user h2 {
+  border-inline-start-color: rgba(255, 255, 255, 0.78);
+}
+
+.message.user h3,
+.message.user a {
+  color: inherit;
+}
+
+.message.user a {
+  text-decoration-color: rgba(255, 255, 255, 0.82);
+}
+
+.message.user li::marker {
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.message.user blockquote {
+  border-inline-start-color: rgba(255, 255, 255, 0.82);
+}
+
+/* Tablet/mobile: compact the rhythm and keep wide content within the bubble. */
+@media (max-width: 768px) {
+  .message h1 {
+    font-size: 1.52em !important;
+  }
+
+  .message h2 {
+    font-size: 1.34em !important;
+  }
+
+  .message h3 {
+    font-size: 1.16em !important;
+  }
+
+  .message pre {
+    padding: 2.45em 0.78em 0.8em;
+    border-radius: 9px;
+  }
+
+  .message pre::before {
+    inset-inline-start: 0.78em;
+  }
+
+  .message table th,
+  .message table td {
+    padding: 0.52em 0.65em;
+    min-width: 5em;
+  }
+
+  .message blockquote {
+    padding: 0.65em 0.8em;
+  }
+}
+
+@media (max-width: 420px) {
+  .message p {
+    line-height: 1.78;
+  }
+
+  .message ul,
+  .message ol {
+    padding-inline-start: 1.4em;
+  }
+
+  .message pre code {
+    font-size: 0.84em !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message a {
+    transition: none;
+  }
+}
