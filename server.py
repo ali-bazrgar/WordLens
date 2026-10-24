@@ -238,6 +238,13 @@ class WordLensHandler(SimpleHTTPRequestHandler):
             self._proxy(openai_endpoint(TTS_BASE, "/audio/speech"), body)
             return
 
+        if clean_path == "/local-api/inference":
+            if not STT_BASE:
+                self._send_json_error(503, "STT upstream is not configured. Enter the STT Base URL in Settings > Provider 3 > API Connections and save, or set WORDLENS_STT_BASE before starting server.py.")
+                return
+            self._proxy(f"{service_root(STT_BASE)}/inference", body)
+            return
+
         if clean_path == "/local-api/audio/transcriptions":
             if not STT_BASE:
                 self._send_json_error(503, "STT upstream is not configured. Enter the STT Base URL in Settings > Provider 3 > API Connections and save, or set WORDLENS_STT_BASE before starting server.py.")
