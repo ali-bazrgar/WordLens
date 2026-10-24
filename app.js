@@ -2588,6 +2588,9 @@ class AIChatApp {
     
     textNodes.forEach(textNode => {
       const text = textNode.textContent;
+      const parent = textNode.parentElement;
+      // Keep code blocks and inline code strictly untouched by font-direction wrappers.
+      if (parent?.closest('pre, code')) continue;
       // Check if contains Persian/Arabic characters
       if (/[\u0600-\u06FF\u0750-\u077F]/.test(text)) {
         const parent = textNode.parentNode;
@@ -2608,9 +2611,10 @@ class AIChatApp {
     let textNode; 
     
     while (textNode = walker.nextNode()) { 
-      const parent = textNode.parentNode; 
-      if (parent.tagName !== 'SCRIPT' && parent.tagName !== 'STYLE') { 
-        nodesToProcess.push(textNode); 
+      const parent = textNode.parentElement;
+      // Clickable dictionary spans must not alter code samples or interfere with links.
+      if (parent && !parent.closest('script, style, pre, code, a, button, textarea')) {
+        nodesToProcess.push(textNode);
       } 
     }
     
@@ -3252,9 +3256,14 @@ Be thorough and comprehensive.`;
     
     const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }], synonyms: [], antonyms: [] });
     try {
-      const modelName = "gemini-2.0-flash-exp";
+      const modelName = "gemini-2.5-flash-lite";
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${this.API_KEY}`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json", temperature: 0.3 } })
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: "application/json", temperature: 0.3, maxOutputTokens: 4096 }
+        })
       });
       if (!response.ok) return returnError(`API Error: ${response.status}`);
       const data = await response.json();
