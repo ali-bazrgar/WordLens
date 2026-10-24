@@ -20,6 +20,8 @@ In Local proxy mode, the URL fields represent the real upstream service URLs. Wh
 - **STT Base URL**: API root for transcription; enter the actual port of your STT server. It is intentionally blank by default because the correct port depends on your running STT service.
 - **TTS model/voice/format** and **STT model/language** must match the specific servers. `en`, `fa`, and `auto` are typical language choices; only use values supported by your STT endpoint.
 
+For local `whisper.cpp`, WordLens converts browser microphone audio to 16 kHz mono WAV, tries `/v1/audio/transcriptions`, and falls back to the server’s native `/inference` route when the OpenAI-compatible route is unavailable or returns a known request-format error. Set the STT Base URL to the server root or its `/v1` API root; do not append `/audio/transcriptions` or `/inference` yourself.
+
 ## Direct API mode
 
 Choose **Direct API — CORS required** if the app is served somewhere other than the local `server.py` proxy. The browser calls the configured base URLs itself, so each endpoint must permit cross-origin requests. When the page is hosted on HTTPS, the browser may also block plain-HTTP local endpoints; use WordLens via `http://127.0.0.1:8000` for the recommended local setup.
@@ -32,6 +34,7 @@ Choose **Direct API — CORS required** if the app is served somewhere other tha
 - `POST /local-api/chat/completions` → LLM `/v1/chat/completions`.
 - `POST /local-api/audio/speech` → TTS `/v1/audio/speech`.
 - `POST /local-api/audio/transcriptions` → STT `/v1/audio/transcriptions`.
+- `POST /local-api/inference` → STT native `/inference` (used as a compatibility fallback for `whisper.cpp`).
 - `GET /local-api/health` — checks LLM/TTS reachability and reports whether STT is configured.
 
 ## Live voice conversation
