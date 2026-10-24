@@ -3172,6 +3172,7 @@ Be thorough and comprehensive.`;
     if (!this.AVALAI_API_KEY) return { meanings: [{ text: `No Provider 2 API Key`, type: "Error" }], synonyms: [], antonyms: [] };
     
     const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
+${forceRefresh ? "This is an explicit refresh request. Re-evaluate the word independently and prefer a genuinely useful alternative Persian gloss/order when it remains accurate. Never invent senses just to be different." : ""}
 
 CRITICAL REQUIREMENTS:
 1. Find ALL possible meanings (at least 3-5 common ones), ordered from MOST COMMON to LEAST COMMON usage
@@ -3210,7 +3211,7 @@ Be thorough and comprehensive.`;
       const response = await fetch('https://api.avalai.ir/v1/chat/completions', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${this.AVALAI_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }], response_format: { type: "json_object" }, temperature: 0.3 })
+        body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }], response_format: { type: "json_object" }, temperature: forceRefresh ? 0.7 : 0.3 })
       });
       if (!response.ok) return returnError(`Provider 2 API Error: ${response.status}`);
       const data = await response.json();
@@ -3244,6 +3245,7 @@ Be thorough and comprehensive.`;
     if (!this.API_KEY) return { meanings: [{ text: `No API Key`, type: "Error" }], synonyms: [], antonyms: [] };
     
     const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
+${forceRefresh ? "This is an explicit refresh request. Re-evaluate the word independently and prefer a genuinely useful alternative Persian gloss/order when it remains accurate. Never invent senses just to be different." : ""}
 
 CRITICAL REQUIREMENTS:
 1. Find ALL possible meanings (at least 3-5 common ones), ordered from MOST COMMON to LEAST COMMON usage
@@ -3285,7 +3287,7 @@ Be thorough and comprehensive.`;
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: "application/json", temperature: 0.3, maxOutputTokens: 4096 }
+          generationConfig: { responseMimeType: "application/json", temperature: forceRefresh ? 0.7 : 0.3, maxOutputTokens: 4096 }
         })
       });
       if (!response.ok) return returnError(`API Error: ${response.status}`);
