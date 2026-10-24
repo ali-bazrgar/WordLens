@@ -474,7 +474,7 @@
       let failed=false;
       try{realtimeSetStatus(this,'Transcribing your turn…','processing');const transcript=await localSTT(audioBlob,this);if(!session.active||this.realtimeSession!==session||!transcript)return;await this.processRealtimeTurn(transcript,session);}
       catch(error){failed=true;console.error('Realtime STT/turn processing failed:',error);if(session.active){realtimeSetStatus(this,'Voice turn failed: '+error.message,'error');this.showToast('Live conversation error: '+error.message,'error');}}
-      finally{if(session.active&&this.realtimeSession===session){session.state='listening';if(!failed)realtimeSetStatus(this,'Listening — speak when ready.','listening');}}
+      finally{if(session.active&&this.realtimeSession===session){session.state='listening';if(session.lastError){realtimeSetStatus(this,session.lastError,'error');session.lastError='';}else if(!failed)realtimeSetStatus(this,'Listening — speak when ready.','listening');}}
     };
     AIChatApp.prototype.processRealtimeTurn=async function(transcript,session){
       if(!this.currentChatId||!session.active||this.realtimeSession!==session||this.isLoading)return;
@@ -487,9 +487,9 @@
         if(chat&&chat.messages.length===2&&!String(chat.title||'').includes('(Imported)')){chat.title=transcript.substring(0,30)+(transcript.length>30?'...':'');this.saveChats();this.renderChatList();this.chatTitle.textContent=chat.title;}
         if(session.active&&this.realtimeSession===session&&answer.trim()){realtimeSetStatus(this,'Speaking…','speaking');
           try{const audioBlob=await localTTS(answer);if(session.active&&this.realtimeSession===session)await playRealtimeAudio(audioBlob,session);}
-          catch(ttsError){console.error('Realtime TTS error:',ttsError);if(session.active){realtimeSetStatus(this,'Reply is in chat, but speech failed: '+ttsError.message,'error');this.showToast('Live TTS failed: '+ttsError.message,'error');}}
+          catch(ttsError){console.error('Realtime TTS error:',ttsError);session.lastError='Reply is in chat, but speech failed: '+ttsError.message;if(session.active){realtimeSetStatus(this,session.lastError,'error');this.showToast('Live TTS failed: '+ttsError.message,'error');}}
         }
-      }catch(error){loadingWrapper.remove();console.error('Realtime LLM error:',error);this.addMessage('ai','Error: '+error.message);if(session.active)realtimeSetStatus(this,'LLM error: '+error.message,'error');}
+      }catch(error){loadingWrapper.remove();console.error('Realtime LLM error:',error);this.addMessage('ai','Error: '+error.message);session.lastError='LLM error: '+error.message;if(session.active){realtimeSetStatus(this,session.lastError,'error');this.showToast(session.lastError,'error');}}
       finally{this.isLoading=false;}
     };
     const originalSendMessage=AIChatApp.prototype.sendMessage;
