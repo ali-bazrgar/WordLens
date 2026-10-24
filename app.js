@@ -313,6 +313,7 @@ class AIChatApp {
     this.theme = localStorage.getItem("theme") || "light";
     this.fontSize = parseInt(localStorage.getItem("font_size")) || 14;
     this.boldText = localStorage.getItem("bold_text") === "true";
+    this.customInstructions = localStorage.getItem("custom_instructions") || "";
     this.chats = JSON.parse(localStorage.getItem("chats")) || [];
     try {
       this.documents = JSON.parse(localStorage.getItem("documents")) || [];
@@ -439,6 +440,7 @@ class AIChatApp {
     this.themeSelect = document.getElementById("theme-select");
     this.fontSizeSelect = document.getElementById("font-size-select");
     this.boldTextCheckbox = document.getElementById("bold-text-checkbox");
+    this.customInstructionsInput = document.getElementById("custom-instructions-input");
     this.saveSettingsBtn = document.getElementById("save-settings");
     this.cancelSettingsBtn = document.getElementById("cancel-settings");
     this.app = document.getElementById("app");
@@ -780,6 +782,7 @@ class AIChatApp {
     this.fontSizeSelect.value = this.fontSize;
     document.getElementById("font-size-value").textContent = this.fontSize;
     this.boldTextCheckbox.checked = this.boldText;
+    if (this.customInstructionsInput) this.customInstructionsInput.value = this.customInstructions;
     this.settingsModal.classList.remove("hidden");
   }
 
@@ -797,6 +800,9 @@ class AIChatApp {
     const theme = this.themeSelect.value;
     const fontSize = this.fontSizeSelect.value;
     const boldText = this.boldTextCheckbox.checked;
+    const customInstructions = this.customInstructionsInput ? this.customInstructionsInput.value.trim() : (this.customInstructions || "");
+    localStorage.setItem("custom_instructions", customInstructions);
+    this.customInstructions = customInstructions;
     
     localStorage.setItem("gemini_api_key", geminiKey);
     this.API_KEY = geminiKey;
@@ -2623,6 +2629,10 @@ class AIChatApp {
     });
   }
 
+  getCustomInstructions() {
+    return String(this.customInstructions ?? localStorage.getItem("custom_instructions") ?? "").trim();
+  }
+
   async sendMessage() {
     const text = this.messageInput.value.trim();
     if (!text || !this.currentChatId) return;
@@ -2716,7 +2726,11 @@ class AIChatApp {
       role: msg.role === "user" ? "user" : "model",
       parts: [{ text: msg.content }]
     }));
+    const lastHistoryItem = history[history.length - 1];
+    if (lastHistoryItem?.role === "user" && lastHistoryItem.parts?.[0]?.text === message) history.pop();
     const requestBody = { contents: [...history, { role: "user", parts: [{ text: message }] }] };
+    const customInstructions = this.getCustomInstructions();
+    if (customInstructions) requestBody.systemInstruction = { parts: [{ text: customInstructions }] };
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${this.API_KEY}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody)
     });
@@ -2732,7 +2746,11 @@ class AIChatApp {
     const history = chat.messages.filter(msg => msg.role !== "system").slice(-10).map(msg => ({
       role: msg.role === "user" ? "user" : "assistant", content: msg.content
     }));
-    const requestBody = { model: "gpt-5-nano", messages: [...history, { role: "user", content: message }] };
+    const lastHistoryItem = history[history.length - 1];
+    if (lastHistoryItem?.role === "user" && lastHistoryItem.content === message) history.pop();
+    const customInstructions = this.getCustomInstructions();
+    const messages = [...(customInstructions ? [{ role: "system", content: customInstructions }] : []), ...history, { role: "user", content: message }];
+    const requestBody = { model: "gpt-5-nano", messages };
     const response = await fetch('https://api.avalai.ir/v1/chat/completions', {
       method: 'POST', headers: { 'Authorization': `Bearer ${this.AVALAI_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
     });
@@ -2750,6 +2768,9 @@ class AIChatApp {
       .filter(msg => msg.role !== "system")
       .slice(-10)
       .map(msg => ({ role: msg.role === "user" ? "user" : "assistant", content: msg.content }));
+    const lastHistoryItem = history[history.length - 1];
+    if (lastHistoryItem?.role === "user" && lastHistoryItem.content === message) history.pop();
+    const customInstructions = this.getCustomInstructions();
 
     const headers = {
       'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
@@ -2765,7 +2786,7 @@ class AIChatApp {
 
     const requestBody = {
       model: 'gemma-4-e2b-it',
-      messages: [...history, { role: 'user', content: message }],
+      messages: [...(customInstructions ? [{ role: 'system', content: customInstructions }] : []), ...history, { role: 'user', content: message }],
       // Free variants may require permissive data-policy routing.
       // If the account-wide privacy setting is more restrictive, the user must change it in OpenRouter settings.
       provider: { data_collection: 'allow' }
