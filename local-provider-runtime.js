@@ -520,16 +520,23 @@
   };
 
   const playLocalBlob = async (app, audioBlob, button, progressBar, spokenText = '') => {
-    if (!audioBlob || !audioBlob.size) throw new Error('Empty local audio blob.');
+    if (!(audioBlob instanceof Blob) || !audioBlob.size) throw new Error('Empty local audio blob.');
 
     const text = String(spokenText ?? '').trim();
     const tokenCount = text ? text.split(/\s+/).filter(Boolean).length : 0;
+    try { app?.stopCurrentAudioPlayback?.(); } catch (_) {}
     const audioUrl = URL.createObjectURL(audioBlob);
     const audio = new Audio(audioUrl);
+    audio.preload = 'auto';
+    audio.playsInline = true;
     audio.playbackRate = tokenCount > 0 && tokenCount <= 2 && text.length <= 64 ? 0.78 : 1;
     try { audio.preservesPitch = true; } catch (_) {}
     try { audio.webkitPreservesPitch = true; } catch (_) {}
 
+    if (app) {
+      app.activeAudioElement = audio;
+      app.activeAudioUrl = audioUrl;
+    }
     if (button) {
       button.disabled = true;
       button.classList.add('playing');
@@ -537,42 +544,43 @@
     if (progressBar && app?.updateProgress) app.updateProgress(progressBar, 0);
 
     await new Promise((resolve, reject) => {
+      let settled = false;
       const cleanup = () => {
         URL.revokeObjectURL(audioUrl);
+        if (app?.activeAudioElement === audio) {
+          app.activeAudioElement = null;
+          app.activeAudioUrl = null;
+        }
         if (button) {
           button.disabled = false;
           button.classList.remove('playing');
         }
       };
-
-      audio.addEventListener('loadedmetadata', () => {
-        if (progressBar && app?.updateProgress && Number.isFinite(audio.duration) && audio.duration > 0) {
-          app.updateProgress(progressBar, 0);
-        }
-      }, { once: true });
+      const finish = (error = null) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(error);
+        else resolve();
+      };
 
       audio.addEventListener('timeupdate', () => {
         if (progressBar && app?.updateProgress && audio.duration > 0) {
           app.updateProgress(progressBar, (audio.currentTime / audio.duration) * 100);
         }
       });
-
       audio.addEventListener('ended', () => {
-        cleanup();
         if (progressBar && app?.updateProgress) app.updateProgress(progressBar, 100);
-        resolve();
+        finish();
       }, { once: true });
-
       audio.addEventListener('error', () => {
-        const detail = audio.error ? `code=${audio.error.code}` : 'unknown audio error';
-        cleanup();
-        reject(new Error(`Browser could not play local WAV (${detail}).`));
+        const detail = audio.error ? 'code=' + audio.error.code : 'unknown audio error';
+        finish(new Error('Browser could not play local audio (' + detail + ').'));
       }, { once: true });
-
-      audio.play().catch((err) => {
-        cleanup();
-        reject(err);
-      });
+      audio.addEventListener('pause', () => {
+        if (app && app.activeAudioElement !== audio && !audio.ended) finish();
+      }, { once: true });
+      audio.play().catch(error => finish(error));
     });
   };
 
@@ -1119,13 +1127,35 @@
     const originalPlayTextToSpeech = AIChatApp.prototype.playTextToSpeech;
     AIChatApp.prototype.playTextToSpeech = async function(text, button, progressBar, messageId) {
       if (this.ttsProvider === 'elevenlabs') {
+        const spokenText = String(text ?? '').trim();
+        if (!spokenText) return;
+        const targetButton = button || document.createElement('button');
+
         try {
-          await this.playWithElevenLabsTTS(text, button, progressBar);
-        } catch (error) {
-          console.error('Local Provider 3 TTS routing error:', error);
-          this.showToast(`Local TTS failed: ${error.message}`, 'error');
+          const cachedAudio = await this.getCachedAudio(spokenText);
+          if (cachedAudio instanceof Blob && cachedAudio.size > 0) {
+            try {
+              await playLocalBlob(this, cachedAudio, targetButton, progressBar, spokenText);
+              return;
+            } catch (playError) {
+              const detail = String(playError?.name || '') + ' ' + String(playError?.message || playError);
+              if (playError?.name === 'NotAllowedError' || /notallowederror|user gesture|play\(\) failed/i.test(detail)) {
+                targetButton.disabled = false;
+                targetButton.classList.remove('playing');
+                if (!this._audioAutoplayBlockedNoticeShown) {
+                  this._audioAutoplayBlockedNoticeShown = true;
+                  this.showToast('The browser blocked automatic audio. Tap the speaker once; the saved audio will be reused.', 'info', 3500);
+                }
+                return;
+              }
+              console.warn('Cached local TTS audio could not be played; generating a replacement:', playError);
+            }
+          }
+        } catch (cacheError) {
+          console.warn('Could not read local TTS audio cache:', cacheError);
         }
-        return;
+
+        return this.playWithElevenLabsTTS(spokenText, targetButton, progressBar);
       }
       return originalPlayTextToSpeech.call(this, text, button, progressBar, messageId);
     };
@@ -1145,6 +1175,45 @@
         button.disabled = false;
         if (progressBar) this.updateProgress(progressBar, 0);
         this.showToast(`Failed to generate speech with Local Provider 3: ${error.message}`, 'error');
+      }
+    AIChatApp.prototype.playWithElevenLabsTTS = async function(text, button, progressBar) {
+      const spokenText = String(text ?? '').trim();
+      if (!spokenText) return;
+      const targetButton = button || document.createElement('button');
+      targetButton.disabled = true;
+      targetButton.classList.add('playing');
+      if (progressBar) this.updateProgress(progressBar, 0);
+      try {
+        const audioBlob = await localTTS(spokenText);
+        if (!(audioBlob instanceof Blob) || audioBlob.size === 0) {
+          throw new Error('Local TTS returned an empty audio blob.');
+        }
+
+        const cacheKey = typeof this.getAudioCacheKey === 'function'
+          ? this.getAudioCacheKey(spokenText)
+          : spokenText.normalize('NFC').trim().replace(/\s+/g, ' ');
+        // Persist before playback: rejected autoplay must not lose generated audio.
+        await this.db.set('audio_cache', {
+          text: cacheKey,
+          originalText: spokenText,
+          value: audioBlob,
+          savedAt: new Date().toISOString()
+        });
+        await playLocalBlob(this, audioBlob, targetButton, progressBar, spokenText);
+      } catch (error) {
+        targetButton.classList.remove('playing');
+        targetButton.disabled = false;
+        if (progressBar) this.updateProgress(progressBar, 0);
+        const detail = String(error?.name || '') + ' ' + String(error?.message || error);
+        if (error?.name === 'NotAllowedError' || /notallowederror|user gesture|play\(\) failed/i.test(detail)) {
+          if (!this._audioAutoplayBlockedNoticeShown) {
+            this._audioAutoplayBlockedNoticeShown = true;
+            this.showToast('Audio was generated and saved, but the browser blocked autoplay. Tap the speaker to play the saved audio.', 'info', 4000);
+          }
+          return;
+        }
+        console.error('Local Provider 3 TTS Error:', error);
+        this.showToast('Failed to generate speech with Local Provider 3: ' + (error?.message || String(error)), 'error');
       }
     };
   }
