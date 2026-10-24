@@ -20,7 +20,7 @@ In Local proxy mode, the URL fields represent the real upstream service URLs. Wh
 - **STT Base URL**: `http://127.0.0.1:8767` by default; change it if your local Whisper server uses a different port.
 - **TTS model/voice/format** and **STT model/language** must match the specific servers. `en`, `fa`, and `auto` are typical language choices; only use values supported by your STT endpoint.
 
-For local `whisper.cpp`, WordLens converts browser microphone audio to 16 kHz mono WAV, tries `/v1/audio/transcriptions`, and falls back to the server’s native `/inference` route when the OpenAI-compatible route is unavailable or returns a known request-format error. Set the STT Base URL to the server root or its `/v1` API root; do not append `/audio/transcriptions` or `/inference` yourself.
+For local `whisper.cpp`, WordLens converts browser microphone audio to 16 kHz mono WAV and calls the native `/inference` route first; OpenAI-compatible `/v1/audio/transcriptions` is the fallback. Both request and response-body reads are bounded by a timeout, and audio conversion has its own deadline, so the UI should return an actionable error rather than remain on `Transcribing…` indefinitely. Set the STT Base URL to the server root or its `/v1` API root; do not append `/audio/transcriptions` or `/inference` yourself.
 
 ### Pocket TTS compatibility
 
@@ -49,10 +49,16 @@ Open or create a chat first and allow microphone access. Browsers require a secu
 
 When WordLens is opened from a private LAN address (for example, `http://192.168.x.x:8000`), **Local proxy** mode sends API requests through that host's `/local-api` proxy. The upstream LLM/TTS/STT Base URLs are controlled by the PC running `server.py` and are read-only on a remote phone in this mode.
 
-The **Direct API** option remains available on phones if the local proxy cannot be reached. In Direct mode, the browser calls the API services itself, so use the PC's LAN address (not `127.0.0.1` or `localhost`) for each service. The services must listen for LAN connections, allow browser CORS, and be permitted through Windows Firewall. The app converts loopback Base URLs to the current WordLens host IP when possible, but this cannot configure the model servers or firewall automatically.
+The **Direct API** option remains available on phones if the local proxy cannot be reached. In Direct mode, the browser calls the API services itself, so each service must listen for LAN connections, allow browser CORS, and be permitted through Windows Firewall. WordLens derives the host address from the page URL and rewrites stale loopback/private-IP Base URLs to that current host where possible; it does not scan the network or configure the model servers/firewall automatically. If all models run on the same PC, Local proxy is preferred because it needs no per-service CORS setup.
 
 Before opening the microphone, Live Conversation checks the local proxy, LLM/TTS health, and whether an STT URL is configured; transcription errors identify the failed request and include LAN connectivity guidance when applicable.
 
 If the button is visible but not responding, hard-refresh the page and check that `local-provider-runtime.js` is loaded successfully in the browser's Network panel. The page loads this file explicitly; the Python server no longer appends it to `app.js`, which prevents missing or duplicate event bindings.
 
 One caveat: this is automatic turn-taking over three OpenAI-compatible APIs, not a single native duplex audio/WebRTC model. STT/TTS services may vary in their supported model IDs, formats and response behavior.
+
+## Troubleshooting mobile and slow requests
+
+- If sending a chat message while another response is generating, the typed message is queued and sent after the current request finishes rather than discarded.
+- Local LLM responses have a 180-second deadline. Local STT tries `/inference` first and falls back to `/v1/audio/transcriptions`; a stalled STT request/response is stopped after 60 seconds. If that timeout occurs repeatedly, check the WordLens terminal for an upstream error and test `http://127.0.0.1:8767/health` or the server's documented health route on the PC.
+- If Local proxy fails from the phone even though the page loads, confirm the PC and phone are on the same Wi-Fi and allow inbound TCP 8000 in Windows Firewall. Since requests are same-origin, browser CORS is not required for Local proxy mode.
