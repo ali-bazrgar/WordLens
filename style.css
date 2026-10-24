@@ -3139,7 +3139,7 @@ body.theme-rgb-glass .btn-send:hover {
   padding: 0.72em 1em;
   border: 0;
   border-inline-start: 3px solid var(--primary-color);
-  border-radius: 0 9px 9px 0;
+  border-radius: 9px;
   background: var(--markdown-soft-bg);
   color: inherit;
   font-style: normal;
@@ -3386,6 +3386,23 @@ body.theme-beige .message {
 
 .message.user h2 {
   border-inline-start-color: rgba(255, 255, 255, 0.78);
+}
+
+.message.user h3,
+.message.user a {
+  color: inherit;
+}
+
+.message.user a {
+  text-decoration-color: rgba(255, 255, 255, 0.82);
+}
+
+.message.user li::marker {
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.message.user blockquote {
+  border-inline-start-color: rgba(255, 255, 255, 0.82);
 }
 
 /* Tablet/mobile: compact the rhythm and keep wide content within the bubble. */
