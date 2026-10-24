@@ -1,18 +1,19 @@
-/* WordLens Local Provider 3 runtime. Loaded by server.py by appending this file to app.js. */
+/* WordLens local-provider runtime. Loaded explicitly by index.html. */
 (() => {
   'use strict';
 
   const DEFAULTS = Object.freeze({
-    llmBase: '/local-api',
+    apiMode: 'proxy',
+    llmBase: 'http://127.0.0.1:1234',
     llmModel: 'Hy-MT2-1.8B-2Bit',
     llmApiKey: '',
-    ttsBase: '/local-api',
+    ttsBase: 'http://127.0.0.1:4321',
     ttsApiKey: '123',
     ttsModel: 'kitten-tts-mini-0.8',
     ttsVoice: 'expr-voice-4-m',
     ttsFormat: 'wav',
     sttProvider: 'openai-compatible',
-    sttBase: '/local-api',
+    sttBase: '',
     sttApiKey: '',
     sttModel: 'whisper-1',
     sttLanguage: 'en'
@@ -20,7 +21,13 @@
 
   const getCfg = (key) => {
     const stored = localStorage.getItem('wordlens_local_' + key);
-    if (stored !== null) return stored.toString().trim();
+    if (stored !== null) {
+      const value = stored.toString().trim();
+      if (value === '/local-api' && ['llmBase', 'ttsBase', 'sttBase'].includes(key)) {
+        return (DEFAULTS[key] ?? '').toString().trim();
+      }
+      return value;
+    }
     if (key === 'sttProvider' && localStorage.getItem('avalai_api_key')) return 'avalai';
     return (DEFAULTS[key] ?? '').toString().trim();
   };
@@ -39,8 +46,47 @@
     return base + '/v1';
   };
 
+  const requestBase = (key) => {
+    if (getCfg('apiMode') !== 'direct') return '/local-api';
+    const configured = getCfg(key);
+    if (!configured) throw new Error('Set the ' + key.replace(/([A-Z])/g, ' $1') + ' Base URL in Settings → Provider 3 — API Connections.');
+    return normalizeApiBase(configured);
+  };
+
+  const syncProxyConfig = async () => {
+    if (getCfg('apiMode') === 'direct') return;
+    const response = await fetch('/local-api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ llm_base: getCfg('llmBase'), tts_base: getCfg('ttsBase'), stt_base: getCfg('sttBase') }),
+      cache: 'no-store'
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error('Could not save API addresses to the local proxy (' + response.status + '). Run WordLens at http://127.0.0.1:8000 or switch to Direct mode. ' + detail);
+    }
+    return response.json();
+  };
+
+  const loadProxyConfig = async (fields) => {
+    if (getCfg('apiMode') === 'direct') return;
+    try {
+      const response = await fetch('/local-api/config', { cache: 'no-store' });
+      if (!response.ok) return;
+      const config = await response.json();
+      const mapping = { llmBase: 'llm_base', ttsBase: 'tts_base', sttBase: 'stt_base' };
+      Object.entries(mapping).forEach(([key, name]) => {
+        if (typeof config[name] !== 'string') return;
+        setCfg(key, config[name]);
+        if (fields[key]) fields[key].value = config[name];
+      });
+    } catch (error) {
+      console.debug('Local proxy configuration is unavailable:', error);
+    }
+  };
+
   const localCompletion = async (messages, extra = {}) => {
-    const base = normalizeApiBase(getCfg('llmBase') || DEFAULTS.llmBase);
+    const base = requestBase('llmBase');
     const model = getCfg('llmModel') || DEFAULTS.llmModel;
     const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
     const apiKey = getCfg('llmApiKey');
@@ -59,7 +105,7 @@
   };
 
   const localTTS = async (text) => {
-    const base = normalizeApiBase(getCfg('ttsBase') || DEFAULTS.ttsBase);
+    const base = requestBase('ttsBase');
     const headers = { 'Content-Type': 'application/json', 'Accept': 'audio/*, application/octet-stream' };
     const apiKey = getCfg('ttsApiKey');
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
@@ -80,7 +126,7 @@
     if (!(audioBlob instanceof Blob) || audioBlob.size === 0) throw new Error('No recorded audio was captured.');
     const provider = getCfg('sttProvider');
     const isAvalai = provider === 'avalai';
-    const base = isAvalai ? 'https://api.avalai.ir/v1' : normalizeApiBase(getCfg('sttBase') || DEFAULTS.sttBase);
+    const base = isAvalai ? 'https://api.avalai.ir/v1' : requestBase('sttBase');
     const apiKey = isAvalai ? (app?.AVALAI_API_KEY || '') : getCfg('sttApiKey');
     if (isAvalai && !apiKey) throw new Error('Avalai STT is selected but its API key is not set in Settings.');
     const formData = new FormData();
@@ -165,19 +211,24 @@
     section.id = 'local-provider-settings';
     section.innerHTML = `
       <p><b>Provider 3 — API Connections</b></p>
-      <small style="color:#666;display:block;margin-bottom:8px;">Set each service's Base URL, model ID and optional API key here. A URL can end at the server root or /v1; the app normalizes it automatically. Use /local-api when running WordLens via server.py.</small>
+      <small style="color:#666;display:block;margin-bottom:8px;">Enter each API's real upstream address below. Local proxy mode (recommended) saves these addresses on this computer and avoids browser CORS. Direct mode calls the URLs from your browser and requires CORS support.</small>
+      <label style="display:block;margin:8px 0 4px;">Connection Mode</label>
+      <select id="local-api-mode" class="settings-select">
+        <option value="proxy">Local proxy — recommended</option>
+        <option value="direct">Direct API — CORS required</option>
+      </select>
       <p style="margin:14px 0 4px;font-weight:700;">1. LLM — Chat, translation and dictionary</p>
       <label style="display:block;margin:6px 0 4px;">LLM Base URL</label>
-      <input type="text" id="local-llm-base-url" placeholder="/local-api or http://127.0.0.1:8080">
-      <small style="color:#666;display:block;margin-top:4px;">Endpoint used for chat/completions. Example: http://127.0.0.1:8080 or http://127.0.0.1:8080/v1.</small>
+      <input type="text" id="local-llm-base-url" placeholder="http://127.0.0.1:8080 or .../v1">
+      <small style="color:#666;display:block;margin-top:4px;">Upstream address sent to <code>/v1/chat/completions</code>. Server root and URLs ending in <code>/v1</code> are both accepted.</small>
       <label style="display:block;margin:8px 0 4px;">LLM Model</label>
       <input type="text" id="local-llm-model" placeholder="Model ID from /v1/models">
       <label style="display:block;margin:8px 0 4px;">LLM API Key (optional)</label>
       <input type="password" id="local-llm-api-key" placeholder="Bearer token, if required">
       <p style="margin:14px 0 4px;font-weight:700;">2. TTS — Spoken replies</p>
       <label style="display:block;margin:8px 0 4px;">TTS Base URL</label>
-      <input type="text" id="local-tts-base-url" placeholder="/local-api or http://127.0.0.1:PORT">
-      <small style="color:#666;display:block;margin-top:4px;">Endpoint used for audio/speech. Use your TTS server's API root or its /v1 URL.</small>
+      <input type="text" id="local-tts-base-url" placeholder="http://127.0.0.1:PORT or .../v1">
+      <small style="color:#666;display:block;margin-top:4px;">Upstream address sent to <code>/v1/audio/speech</code>.</small>
       <label style="display:block;margin:8px 0 4px;">TTS Model</label>
       <input type="text" id="local-tts-model" placeholder="kitten-tts-mini-0.8">
       <label style="display:block;margin:8px 0 4px;">TTS API Key (optional)</label>
@@ -190,8 +241,8 @@
       <label style="display:block;margin:8px 0 4px;">STT Provider</label>
       <select id="local-stt-provider" class="settings-select"><option value="openai-compatible">OpenAI-compatible STT (local)</option><option value="avalai">Avalai Whisper API</option></select>
       <label style="display:block;margin:8px 0 4px;">STT API Base URL</label>
-      <input type="text" id="local-stt-base-url" placeholder="/local-api or http://127.0.0.1:PORT">
-      <small style="color:#666;display:block;margin-top:4px;">When using /local-api, set WORDLENS_STT_BASE before starting server.py. For direct URLs, the server root or /v1 are both accepted (CORS must be allowed).</small>
+      <input type="text" id="local-stt-base-url" placeholder="http://127.0.0.1:PORT or .../v1">
+      <small style="color:#666;display:block;margin-top:4px;">Upstream address sent to <code>/v1/audio/transcriptions</code>. Enter the real STT API address; no port is guessed.</small>
       <label style="display:block;margin:8px 0 4px;">STT API Key (optional for local endpoints)</label>
       <input type="password" id="local-stt-api-key" placeholder="Bearer token, if required">
       <label style="display:block;margin:8px 0 4px;">STT Model</label>
@@ -203,6 +254,8 @@
     `;
     scroll.appendChild(section);
 
+    const apiModeField = document.getElementById('local-api-mode');
+    apiModeField.value = getCfg('apiMode');
     document.getElementById('local-llm-base-url').value = getCfg('llmBase');
     document.getElementById('local-llm-model').value = getCfg('llmModel');
     document.getElementById('local-llm-api-key').value = getCfg('llmApiKey');
@@ -217,16 +270,40 @@
     document.getElementById('local-stt-model').value = getCfg('sttModel');
     document.getElementById('local-stt-language').value = getCfg('sttLanguage');
 
+    const fields = {
+      apiMode: apiModeField,
+      llmBase: document.getElementById('local-llm-base-url'),
+      llmModel: document.getElementById('local-llm-model'),
+      llmApiKey: document.getElementById('local-llm-api-key'),
+      ttsBase: document.getElementById('local-tts-base-url'),
+      ttsModel: document.getElementById('local-tts-model'),
+      ttsApiKey: document.getElementById('local-tts-api-key'),
+      ttsVoice: document.getElementById('local-tts-voice'),
+      ttsFormat: document.getElementById('local-tts-format'),
+      sttProvider: document.getElementById('local-stt-provider'),
+      sttBase: document.getElementById('local-stt-base-url'),
+      sttApiKey: document.getElementById('local-stt-api-key'),
+      sttModel: document.getElementById('local-stt-model'),
+      sttLanguage: document.getElementById('local-stt-language')
+    };
+    loadProxyConfig(fields);
+    apiModeField.addEventListener('change', () => {
+      const status = document.getElementById('local-provider-status');
+      status.textContent = apiModeField.value === 'proxy'
+        ? 'Local proxy mode saves the Base URLs below into server.py settings.'
+        : 'Direct mode calls these URLs from the browser; each API must allow CORS.';
+    });
+
     document.getElementById('local-provider-test').addEventListener('click', async () => {
       const status = document.getElementById('local-provider-status');
-      const fields = { llmBase: document.getElementById('local-llm-base-url'), llmModel: document.getElementById('local-llm-model'), llmApiKey: document.getElementById('local-llm-api-key'), ttsBase: document.getElementById('local-tts-base-url'), ttsModel: document.getElementById('local-tts-model'), ttsApiKey: document.getElementById('local-tts-api-key'), ttsVoice: document.getElementById('local-tts-voice'), ttsFormat: document.getElementById('local-tts-format'), sttProvider: document.getElementById('local-stt-provider'), sttBase: document.getElementById('local-stt-base-url'), sttApiKey: document.getElementById('local-stt-api-key'), sttModel: document.getElementById('local-stt-model'), sttLanguage: document.getElementById('local-stt-language') };
       Object.entries(fields).forEach(([key, element]) => { if (element) setCfg(key, element.value); });
-      status.textContent = 'Testing configured OpenAI-compatible LLM and TTS endpoints…';
+      status.textContent = 'Saving addresses and testing LLM + TTS…';
       try {
+        await syncProxyConfig();
         const llmSample = await localCompletion([{ role: 'user', content: 'Reply with exactly OK.' }], { temperature: 0, max_tokens: 8 });
         const ttsSample = await localTTS('Hello, this is a local text to speech test.');
         if (!(ttsSample instanceof Blob) || ttsSample.size === 0) throw new Error('TTS synthesis returned no audio.');
-        const sttHint = getCfg('sttProvider') === 'avalai' ? 'Avalai STT selected; it is tested when you record.' : 'STT is tested on the first recording.';
+        const sttHint = getCfg('sttProvider') === 'avalai' ? 'Avalai STT key is checked when recording.' : (!getCfg('sttBase') ? 'Enter the actual STT Base URL before transcribing.' : 'STT is tested on the first recording.');
         status.textContent = 'OK — LLM replied “' + llmSample.slice(0,60) + '”; TTS returned ' + Math.round(ttsSample.size/1024) + ' KB audio. ' + sttHint;
       } catch (error) { status.textContent = 'Error: ' + error.message; console.error('Local Provider 3 test failed:', error); }
     });
@@ -251,8 +328,9 @@
     };
 
     const originalSaveSettings = AIChatApp.prototype.saveSettings;
-    AIChatApp.prototype.saveSettings = function() {
+    AIChatApp.prototype.saveSettings = async function() {
       const fields = {
+        apiMode: document.getElementById('local-api-mode'),
         llmBase: document.getElementById('local-llm-base-url'),
         llmModel: document.getElementById('local-llm-model'),
         llmApiKey: document.getElementById('local-llm-api-key'),
@@ -267,10 +345,15 @@
         sttModel: document.getElementById('local-stt-model'),
         sttLanguage: document.getElementById('local-stt-language')
       };
-      Object.entries(fields).forEach(([key, element]) => {
-        if (element) setCfg(key, element.value);
-      });
+      Object.entries(fields).forEach(([key, element]) => { if (element) setCfg(key, element.value); });
+      let proxyError = null;
+      try { await syncProxyConfig(); } catch (error) { proxyError = error; console.error('API proxy settings could not be saved:', error); }
       originalSaveSettings.call(this);
+      if (proxyError && getCfg('apiMode') === 'proxy') {
+        this.showToast('Browser settings saved, but local API addresses were not updated. Open WordLens through server.py or switch to Direct mode. ' + proxyError.message, 'warning');
+      } else {
+        this.showToast('API connection settings saved.', 'success');
+      }
     };
 
     AIChatApp.prototype.callOpenRouterChatAPI = async function(message) {
@@ -429,12 +512,45 @@
     AIChatApp.prototype.bindEvents=function(){originalBindEvents.call(this);this.realtimeBtn=document.getElementById('realtime-btn');this.realtimeStatus=document.getElementById('realtime-status');this.realtimeSession=null;this.realtimeStarting=false;
       this.realtimeBtn?.addEventListener('click',()=>{if(this.realtimeSession)this.stopRealtimeConversation();else this.startRealtimeConversation();});
     };
+    AIChatApp.prototype.validateRealtimeConfiguration = async function() {
+      if (getCfg('apiMode') === 'direct') {
+        if (!getCfg('llmBase')) throw new Error('Set the LLM Base URL under Settings → Provider 3 — API Connections.');
+        if (!getCfg('ttsBase')) throw new Error('Set the TTS Base URL under Settings → Provider 3 — API Connections.');
+        if (getCfg('sttProvider') === 'avalai') {
+          if (!this.AVALAI_API_KEY) throw new Error('Avalai STT is selected, but its API key is not set in Settings.');
+        } else if (!getCfg('sttBase')) throw new Error('Set the STT Base URL under Settings → Provider 3 — API Connections.');
+        return;
+      }
+      let response;
+      try { response = await fetch('/local-api/config', { cache: 'no-store' }); }
+      catch (_) { throw new Error('The local API proxy is not reachable. Run python server.py and open http://127.0.0.1:8000, or switch Connection Mode to Direct.'); }
+      if (!response.ok) throw new Error('The local proxy is not available at this page origin. Run WordLens using server.py or switch Connection Mode to Direct.');
+      const config = await response.json();
+      if (getCfg('sttProvider') !== 'avalai' && !String(config.stt_base || '').trim()) {
+        throw new Error('STT address is missing. Open Settings → Provider 3 — API Connections, enter the STT Base URL, then Save Settings.');
+      }
+      const healthResponse = await fetch('/local-api/health', { cache: 'no-store' });
+      if (!healthResponse.ok) throw new Error('Local LLM/TTS health check failed. Verify their Base URLs and make sure both servers are running.');
+      const health = await healthResponse.json();
+      if (health.status !== 'ok') throw new Error('Local proxy could not reach the configured LLM/TTS servers: ' + (health.message || 'unknown upstream error'));
+    };
+
     AIChatApp.prototype.startRealtimeConversation=async function(){
       if(this.realtimeStarting||this.realtimeSession)return;
       if(!this.currentChatId){this.showToast('Open or create a chat before starting a live conversation.','warning');return;}
       if(this.isLoading){this.showToast('Wait for the current response to finish before starting live conversation.','warning');return;}
       if(!navigator.mediaDevices?.getUserMedia||typeof MediaRecorder==='undefined'){this.showToast('Microphone capture requires a supported browser over HTTPS or localhost.','error');return;}
-      this.realtimeStarting=true;if(this.realtimeBtn)this.realtimeBtn.disabled=true;realtimeSetStatus(this,'Requesting microphone access…','processing');
+      this.realtimeStarting=true;if(this.realtimeBtn)this.realtimeBtn.disabled=true;
+      realtimeSetStatus(this,'Checking API connections…','processing');
+      try { await this.validateRealtimeConfiguration(); }
+      catch (error) {
+        if(this.realtimeBtn)this.realtimeBtn.disabled=false;
+        realtimeSetStatus(this,error.message,'error');
+        this.showToast(error.message,'error');
+        this.realtimeStarting=false;
+        return;
+      }
+      realtimeSetStatus(this,'Requesting microphone access…','processing');
       let stream=null,audioContext=null;
       try{
         stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
