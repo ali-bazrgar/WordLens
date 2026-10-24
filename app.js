@@ -2526,8 +2526,8 @@ class AIChatApp {
       });
       if (!response.ok) throw new Error(`Provider 2 TTS API error: ${response.status} ${response.statusText}`);
       const audioBlob = await response.blob();
+      await this.saveAudioCache(text, audioBlob);
       await this.playAudio(audioBlob, button, progressBar, text);
-      await this.db.set('audio_cache', { text: text, value: audioBlob }).catch(err => console.error("Failed to cache audio:", err));
     } catch (error) {
       console.error("Provider 2 TTS Error:", error);
       button.classList.remove("playing");
