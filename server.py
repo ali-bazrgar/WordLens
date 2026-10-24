@@ -1,6 +1,12 @@
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+import http.client
+import queue
+import select
+import socket
+import threading
+from urllib.parse import urlparse
 import json
 import os
 import ipaddress
@@ -141,33 +147,94 @@ class WordLensHandler(SimpleHTTPRequestHandler):
             if value:
                 headers[name] = value
 
-        request = Request(upstream_url, data=body, headers=headers, method=self.command)
+        # Stream upstream chunks to the browser instead of buffering the entire
+        # response. This is essential for cancellable SSE generation: when the
+        # browser aborts, a failed downstream write closes the upstream socket.
+        parsed = urlparse(upstream_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            self._send_json_error(400, "Invalid upstream URL.")
+            return
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        connection = connection_type(parsed.hostname, parsed.port, timeout=300)
+        events = queue.Queue()
 
+        def fetch_upstream():
+            try:
+                connection.request(self.command, path, body=body, headers=headers)
+                response = connection.getresponse()
+                events.put(("headers", response.status, response.headers.get("Content-Type", "application/octet-stream")))
+                while True:
+                    chunk = response.read1(8192)
+                    if not chunk:
+                        break
+                    events.put(("chunk", chunk))
+                events.put(("done", None))
+            except Exception as exc:
+                events.put(("error", exc))
+            finally:
+                connection.close()
+
+        self.close_connection = True
+        worker = threading.Thread(target=fetch_upstream, name="wordlens-api-proxy", daemon=True)
+        worker.start()
+        headers_sent = False
         try:
-            with urlopen(request, timeout=300) as response:
-                data = response.read()
-                self.send_response(response.status)
-                content_type = response.headers.get("Content-Type")
-                if content_type:
+            while True:
+                try:
+                    kind, value, *extra = events.get(timeout=0.1)
+                except queue.Empty:
+                    # Detect a cancelled browser fetch even if the upstream
+                    # model is still thinking and hasn't sent its next token.
+                    try:
+                        readable, _, exceptional = select.select([self.connection], [], [self.connection], 0)
+                        if exceptional:
+                            connection.close()
+                            return
+                        if readable:
+                            peek = self.connection.recv(1, socket.MSG_PEEK)
+                            if not peek:
+                                connection.close()
+                                return
+                    except (OSError, ValueError):
+                        connection.close()
+                        return
+                    continue
+
+                if kind == "headers":
+                    status = value
+                    content_type = extra[0]
+                    self.send_response(status)
                     self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-        except HTTPError as exc:
-            data = exc.read()
-            content_type = exc.headers.get("Content-Type", "application/json")
-            self.send_response(exc.code)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-        except (URLError, TimeoutError, OSError) as exc:
-            payload = json.dumps({"error": {"message": f"Local upstream unavailable: {exc}"}}).encode("utf-8")
-            self.send_response(502)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    headers_sent = True
+                elif kind == "chunk":
+                    self.wfile.write(value)
+                    self.wfile.flush()
+                elif kind == "done":
+                    return
+                elif kind == "error":
+                    if headers_sent:
+                        return
+                    exc = value
+                    payload = json.dumps({"error": {"message": f"Local upstream unavailable: {exc}"}}).encode("utf-8")
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            # The browser cancelled the request. Closing upstream abandons the
+            # streamed generation instead of keeping it alive for the full answer.
+            connection.close()
+            return
+        finally:
+            connection.close()
 
     def _serve_app_js(self):
         """Serve app.js unchanged; local-provider-runtime.js is loaded explicitly by index.html."""
