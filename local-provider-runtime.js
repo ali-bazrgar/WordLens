@@ -106,6 +106,15 @@
     } catch (_) {}
     return raw;
   };
+  // Migrate old loopback values once even if the Direct-mode settings panel is
+  // not opened before starting a chat on the phone.
+  if (isLanHostedClient() && getCfg('apiMode') === 'direct') {
+    ['llmBase', 'ttsBase', 'sttBase'].forEach(key => {
+      const current = getCfg(key);
+      const accessible = makeLanServiceUrl(current);
+      if (accessible && accessible !== current) setCfg(key, accessible);
+    });
+  }
 
   const fetchWithNetworkDiagnostics = async (url, options, label) => {
     try {
@@ -790,10 +799,15 @@
             }
           }
         }
+        let firstParsed = null;
         for (const candidate of candidates) {
-          try { return JSON.parse(candidate); } catch (_) {}
+          try {
+            const parsed = JSON.parse(candidate);
+            if (parsed && typeof parsed === 'object' && Array.isArray(parsed.meanings)) return parsed;
+            if (!firstParsed) firstParsed = parsed;
+          } catch (_) {}
         }
-        return null;
+        return firstParsed;
       };
 
       try {
