@@ -1076,6 +1076,14 @@ class AIChatApp {
     // Migrate legacy SM-2 records without losing their existing due dates or counters.
     const reps = nonNegativeInteger(repetitionsFallback);
     const interval = Math.max(0, Number(intervalFallback) || 0);
+    const inferredLastReview = toIso(lastReviewedFallback) || (() => {
+      if (reps <= 0) return null;
+      const dueIso = toIso(card?.dueDate);
+      if (!dueIso) return null;
+      const approximate = new Date(dueIso);
+      approximate.setDate(approximate.getDate() - interval);
+      return approximate.toISOString();
+    })();
     const easeFactor = clamp(Number(card?.easeFactor) || 2.5, 1.3, 2.5);
     const legacyDifficulty = clamp(10 - ((easeFactor - 1.3) / 1.2) * 9, 1, 10);
     const legacyStatus = String(card?.status || "").toLowerCase();
@@ -1086,7 +1094,7 @@ class AIChatApp {
       state: reps > 0 ? (legacyStatus === "learning" || legacyStatus === "relearning" ? legacyStatus : "review") : "new",
       reps,
       lapses: 0,
-      lastReview: toIso(lastReviewedFallback),
+      lastReview: inferredLastReview,
       scheduledDays: interval,
       elapsedDays: 0,
       retrievability: 1,
@@ -1173,42 +1181,39 @@ class AIChatApp {
   mergeLeitnerCards(existingCard, incomingCard) {
     const existingRep = Number.isFinite(existingCard?.repetitions) ? existingCard.repetitions : 0;
     const incomingRep = Number.isFinite(incomingCard?.repetitions) ? incomingCard.repetitions : 0;
-
     const existingLast = existingCard?.lastReviewed ? new Date(existingCard.lastReviewed) : null;
     const incomingLast = incomingCard?.lastReviewed ? new Date(incomingCard.lastReviewed) : null;
     const existingLastTs = existingLast && !Number.isNaN(existingLast.getTime()) ? existingLast.getTime() : -1;
     const incomingLastTs = incomingLast && !Number.isNaN(incomingLast.getTime()) ? incomingLast.getTime() : -1;
 
-    const winner =
-      incomingRep > existingRep ? incomingCard :
-      existingRep > incomingRep ? existingCard :
-      incomingLastTs > existingLastTs ? incomingCard : existingCard;
+    // A single scheduler state must own both memory and due date. Prefer the most recently
+    // reviewed record; use repetition count only as a tie-breaker for legacy records.
+    const winner = incomingLastTs > existingLastTs
+      ? incomingCard
+      : existingLastTs > incomingLastTs
+        ? existingCard
+        : incomingRep > existingRep ? incomingCard : existingCard;
 
-    const createdAt = this.coerceIsoDate(
-      (existingCard?.createdAt && incomingCard?.createdAt)
-        ? (new Date(existingCard.createdAt) < new Date(incomingCard.createdAt) ? existingCard.createdAt : incomingCard.createdAt)
-        : (existingCard?.createdAt || incomingCard?.createdAt),
-      null
-    );
+    const dates = [existingCard?.createdAt, incomingCard?.createdAt]
+      .map(value => value ? new Date(value) : null)
+      .filter(value => value && !Number.isNaN(value.getTime()));
+    const createdAt = dates.length
+      ? new Date(Math.min(...dates.map(value => value.getTime()))).toISOString()
+      : new Date().toISOString();
 
-    const dueA = existingCard?.dueDate ? new Date(existingCard.dueDate) : null;
-    const dueB = incomingCard?.dueDate ? new Date(incomingCard.dueDate) : null;
-    const dueATs = dueA && !Number.isNaN(dueA.getTime()) ? dueA.getTime() : Number.POSITIVE_INFINITY;
-    const dueBTs = dueB && !Number.isNaN(dueB.getTime()) ? dueB.getTime() : Number.POSITIVE_INFINITY;
-    const dueDate = this.coerceIsoDate(dueATs <= dueBTs ? existingCard?.dueDate : incomingCard?.dueDate, createdAt);
-
-    const todayMidnight = this.getMidnightLocal(new Date());
-    const dueMidnight = this.getMidnightLocal(dueDate);
-    const intervalDays = (todayMidnight && dueMidnight)
-      ? Math.max(0, Math.round((dueMidnight.getTime() - todayMidnight.getTime()) / (24 * 60 * 60 * 1000)))
-      : (Number.isFinite(winner?.interval) ? winner.interval : 0);
-
-    const lastReviewedIso = this.coerceIsoDate(incomingLastTs >= existingLastTs ? incomingCard?.lastReviewed : existingCard?.lastReviewed, null);
-    const lastReviewed = (incomingLastTs >= 0 || existingLastTs >= 0) ? lastReviewedIso : null;
+    const winnerLast = winner?.lastReviewed ? new Date(winner.lastReviewed) : null;
+    const lastReviewed = winnerLast && !Number.isNaN(winnerLast.getTime()) ? winnerLast.toISOString() : null;
+    const repetitions = Number.isFinite(winner?.fsrs?.reps)
+      ? winner.fsrs.reps
+      : Math.max(existingRep, incomingRep);
+    const interval = Number.isFinite(winner?.fsrs?.scheduledDays)
+      ? Math.max(0, Math.floor(winner.fsrs.scheduledDays))
+      : (Number.isFinite(winner?.interval) ? Math.max(0, Math.floor(winner.interval)) : 0);
+    const dueDate = this.coerceIsoDate(winner?.dueDate, createdAt);
+    const fsrs = this.normalizeFSRSState(winner, lastReviewed, repetitions, interval);
 
     return {
       ...winner,
-      // Force canonical identity from incoming (already normalized)
       id: incomingCard.id,
       word: incomingCard.word,
       scopeType: incomingCard.scopeType,
@@ -1216,10 +1221,11 @@ class AIChatApp {
       scopeKey: incomingCard.scopeKey,
       createdAt,
       dueDate,
-      repetitions: Math.max(existingRep, incomingRep),
-      interval: intervalDays,
+      repetitions,
+      interval,
       easeFactor: Math.max(1.3, Number.isFinite(winner?.easeFactor) ? winner.easeFactor : 2.5),
-      lastReviewed
+      lastReviewed,
+      fsrs
     };
   }
 
@@ -4188,7 +4194,8 @@ Be thorough and comprehensive.`;
           avalai_api_key: this.AVALAI_API_KEY || '',
           openrouter_api_key: this.OPENROUTER_API_KEY || '',
           elevenlabs_api_key: this.ELEVENLABS_API_KEY || '',
-          elevenlabs_voice_id: this.ELEVENLABS_VOICE_ID || ''
+          elevenlabs_voice_id: this.ELEVENLABS_VOICE_ID || '',
+          custom_instructions: this.getCustomInstructions()
         },
         indexedDB: {
           word_meanings: wordMeanings || [],
@@ -4363,6 +4370,11 @@ Be thorough and comprehensive.`;
           this.ELEVENLABS_VOICE_ID = localData.elevenlabs_voice_id;
           localStorage.setItem('elevenlabs_voice_id', this.ELEVENLABS_VOICE_ID || '');
           if (this.elevenLabsVoiceIdInput) this.elevenLabsVoiceIdInput.value = this.ELEVENLABS_VOICE_ID;
+        }
+        if (typeof localData.custom_instructions === 'string') {
+          this.customInstructions = localData.custom_instructions;
+          localStorage.setItem('custom_instructions', this.customInstructions);
+          if (this.customInstructionsInput) this.customInstructionsInput.value = this.customInstructions;
         }
 
         // Import word meanings
