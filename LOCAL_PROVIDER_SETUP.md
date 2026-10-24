@@ -16,11 +16,15 @@ In Local proxy mode, the URL fields represent the real upstream service URLs. Wh
 ### Base URL meaning
 
 - **LLM Base URL**: API root for chat completions; e.g. `http://127.0.0.1:8080` or `http://127.0.0.1:8080/v1`.
-- **TTS Base URL**: API root for speech generation; enter the actual port of your TTS server.
-- **STT Base URL**: API root for transcription; enter the actual port of your STT server. It is intentionally blank by default because the correct port depends on your running STT service.
+- **TTS Base URL**: `http://127.0.0.1:8082` by default; Pocket TTS is called through `/v1/audio/speech` when OpenAI-compatible, with a native `/tts` fallback.
+- **STT Base URL**: `http://127.0.0.1:8767` by default; change it if your local Whisper server uses a different port.
 - **TTS model/voice/format** and **STT model/language** must match the specific servers. `en`, `fa`, and `auto` are typical language choices; only use values supported by your STT endpoint.
 
 For local `whisper.cpp`, WordLens converts browser microphone audio to 16 kHz mono WAV, tries `/v1/audio/transcriptions`, and falls back to the server’s native `/inference` route when the OpenAI-compatible route is unavailable or returns a known request-format error. Set the STT Base URL to the server root or its `/v1` API root; do not append `/audio/transcriptions` or `/inference` yourself.
+
+### Pocket TTS compatibility
+
+WordLens now defaults Provider 3 to model `pocket-tts` and voice `clone`. It tries the OpenAI-compatible `/v1/audio/speech` endpoint first. If the endpoint is unavailable or rejects that request format, it retries the native Kyutai Pocket TTS `/tts` endpoint using multipart form data. The native endpoint uses the voice configured as the Pocket TTS server's default; set that default to your cloned voice. The API key is blank by default for local servers. Legacy defaults (`4321`, `kitten-tts-mini-0.8`, and the previous voice) are migrated automatically.
 
 ## Direct API mode
 
