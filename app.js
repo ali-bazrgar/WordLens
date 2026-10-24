@@ -3138,19 +3138,19 @@ class AIChatApp {
     const target = String(word ?? '').trim();
     if (!target || (!needSynonyms && !needAntonyms)) return { synonyms: [], antonyms: [] };
 
-    const normalizeTerms = (value) => {
+    const normalizeTerms = value => {
       const items = Array.isArray(value)
         ? value
         : typeof value === 'string'
-          ? value.split(/[,;\\n]/g)
+          ? value.split(/[,;\n]/g)
           : Array.isArray(value?.items) ? value.items
             : Array.isArray(value?.words) ? value.words : [];
       const seen = new Set();
       return items
         .map(item => String(typeof item === 'object' && item !== null
           ? (item.word ?? item.term ?? item.text ?? '')
-          : item ?? '').trim().replace(/^["'\\s]+|["'\\s]+$/g, ''))
-        .filter(item => /^[A-Za-z][A-Za-z\\s'-]*$/.test(item))
+          : item ?? '').trim().replace(/^["'\s]+|["'\s]+$/g, ''))
+        .filter(item => /^[A-Za-z][A-Za-z\s'-]*$/.test(item))
         .filter(item => {
           const key = item.toLowerCase();
           if (seen.has(key)) return false;
@@ -3159,19 +3159,18 @@ class AIChatApp {
         })
         .slice(0, 3);
     };
-    const normalizeResponse = (value) => ({
+    const normalizeResponse = value => ({
       synonyms: normalizeTerms(value?.synonyms ?? value?.synonym ?? value?.near_synonyms ?? value?.similar_words ?? value?.synonyms_en),
       antonyms: normalizeTerms(value?.antonyms ?? value?.antonym ?? value?.opposites ?? value?.opposite_words ?? value?.antonyms_en)
     });
 
     const wanted = [
-      needSynonyms ? 'synonyms: give 2-3 common, useful English synonyms/near-synonyms.' : '',
-      needAntonyms ? 'antonyms: give 1-2 common English opposites when a meaningful opposite exists.' : ''
+      needSynonyms ? 'synonyms: give 2 common, useful English synonyms or near-synonyms.' : '',
+      needAntonyms ? 'antonyms: give 1-2 common English opposites if a meaningful opposite exists.' : ''
     ].filter(Boolean).join(' ');
-    const prompt = `For the English headword ${JSON.stringify(target)}, produce only the requested related-word lists.
-${wanted}
-Return JSON only: {"synonyms":["English"],"antonyms":["English"]}.
-Use English words only, no meanings or explanations. For a truly unavailable category use []. Do not omit a category that has a reasonable answer.`;
+    const prompt = 'For English headword ' + JSON.stringify(target) + ', return only the requested related-word lists. ' +
+      wanted + ' Return JSON only: {"synonyms":["English"],"antonyms":["English"]}. ' +
+      'English terms only; no meanings or explanations. Use [] only if no reasonable answer exists.';
 
     try {
       let raw = '';
@@ -3179,23 +3178,23 @@ Use English words only, no meanings or explanations. For a truly unavailable cat
         if (!this.AVALAI_API_KEY) return { synonyms: [], antonyms: [] };
         const response = await fetch('https://api.avalai.ir/v1/chat/completions', {
           method: 'POST',
-          headers: { 'Authorization': `Bearer ${this.AVALAI_API_KEY}`, 'Content-Type': 'application/json' },
+          headers: { 'Authorization': 'Bearer ' + this.AVALAI_API_KEY, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: 'gpt-4o-mini',
             messages: [{ role: 'user', content: prompt }],
             response_format: { type: 'json_object' },
             temperature: 0.1,
-            max_tokens: 96
+            max_tokens: 80
           })
         });
         if (!response.ok) throw new Error('Avalai related-terms API returned HTTP ' + response.status);
-        raw = response.json ? (await response.json()).choices?.[0]?.message?.content || '' : '';
+        raw = (await response.json()).choices?.[0]?.message?.content || '';
       } else if (this.chatProvider === 'openrouter') {
         if (!this.OPENROUTER_API_KEY) return { synonyms: [], antonyms: [] };
         const response = await fetch('/local-api/chat/completions', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
+            'Authorization': 'Bearer ' + this.OPENROUTER_API_KEY,
             'Content-Type': 'application/json',
             ...(typeof location !== 'undefined' && location.origin && location.origin !== 'null' ? { 'HTTP-Referer': location.origin } : {}),
             ...(typeof document !== 'undefined' && document.title ? { 'X-Title': document.title } : {})
@@ -3205,31 +3204,32 @@ Use English words only, no meanings or explanations. For a truly unavailable cat
             messages: [{ role: 'user', content: prompt }],
             provider: { data_collection: 'allow' },
             temperature: 0.1,
-            max_tokens: 96
+            max_tokens: 80
           })
         });
         if (!response.ok) throw new Error('OpenRouter related-terms API returned HTTP ' + response.status);
         raw = (await response.json()).choices?.[0]?.message?.content || '';
       } else {
         if (!this.API_KEY) return { synonyms: [], antonyms: [] };
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${this.API_KEY}`, {
+        const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + this.API_KEY, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            generationConfig: { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 112 }
+            generationConfig: { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 96 }
           })
         });
         if (!response.ok) throw new Error('Gemini related-terms API returned HTTP ' + response.status);
         raw = (await response.json()).candidates?.[0]?.content?.parts?.[0]?.text || '';
       }
 
-      const normalized = String(raw).trim().replace(/^\`\`\`(?:json)?\\s*/i, '').replace(/\\s*\`\`\`\\s*$/i, '');
-      const start = normalized.indexOf('{');
-      const end = normalized.lastIndexOf('}');
-      if (start < 0 || end <= start) return { synonyms: [], antonyms: [] };
+      const normalized = String(raw).trim();
+      const startIndex = normalized.indexOf('{');
+      const endIndex = normalized.lastIndexOf('}');
+      if (startIndex < 0 || endIndex <= startIndex) return { synonyms: [], antonyms: [] };
       try {
-        return normalizeResponse(JSON.parse(normalized.slice(start, end + 1).replace(/,(\\s*[}\\]])/g, '$1')));
+        const parsed = JSON.parse(normalized.slice(startIndex, endIndex + 1).replace(/,(\s*[}\]])/g, '$1'));
+        return normalizeResponse(parsed);
       } catch (_) {
         return { synonyms: [], antonyms: [] };
       }
