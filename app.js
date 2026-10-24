@@ -1,4 +1,4 @@
-window.WORDLENS_WORD_MEANING_PROMPT_VERSION = '20261024-lexicon-v5';
+window.WORDLENS_WORD_MEANING_PROMPT_VERSION = '20261024-meanings-only-v6';
 
 // --- Notification Manager for Toast Messages (replaces alert) ---
 class NotificationManager {
@@ -3127,119 +3127,14 @@ class AIChatApp {
   }
 
   // ---------- Dictionary / Translation ----------
-  async getWordMeaning(word, { forceRefresh = false, requirePersian = false, requireRelatedTerms = false } = {}) {
-    const options = { forceRefresh, requirePersian, requireRelatedTerms };
+  async getWordMeaning(word, { forceRefresh = false, requirePersian = false } = {}) {
+    const options = { forceRefresh, requirePersian };
     if (this.chatProvider === 'avalai') return this.getWordMeaningAvalai(word, options);
     if (this.chatProvider === 'openrouter') return this.getWordMeaningOpenRouter(word, options);
     return this.getWordMeaningGemini(word, options);
   }
 
-  async getWordRelatedTerms(word, { needSynonyms = true, needAntonyms = true } = {}) {
-    const target = String(word ?? '').trim();
-    if (!target || (!needSynonyms && !needAntonyms)) return { synonyms: [], antonyms: [] };
-
-    const normalizeTerms = value => {
-      const items = Array.isArray(value)
-        ? value
-        : typeof value === 'string'
-          ? value.split(/[,;\n]/g)
-          : Array.isArray(value?.items) ? value.items
-            : Array.isArray(value?.words) ? value.words : [];
-      const seen = new Set();
-      return items
-        .map(item => String(typeof item === 'object' && item !== null
-          ? (item.word ?? item.term ?? item.text ?? '')
-          : item ?? '').trim().replace(/^["'\s]+|["'\s]+$/g, ''))
-        .filter(item => /^[A-Za-z][A-Za-z\s'-]*$/.test(item))
-        .filter(item => {
-          const key = item.toLowerCase();
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        })
-        .slice(0, 3);
-    };
-    const normalizeResponse = value => ({
-      synonyms: normalizeTerms(value?.synonyms ?? value?.synonym ?? value?.near_synonyms ?? value?.similar_words ?? value?.synonyms_en),
-      antonyms: normalizeTerms(value?.antonyms ?? value?.antonym ?? value?.opposites ?? value?.opposite_words ?? value?.antonyms_en)
-    });
-
-    const wanted = [
-      needSynonyms ? 'synonyms: give 2 common, useful English synonyms or near-synonyms.' : '',
-      needAntonyms ? 'antonyms: give 1-2 common English opposites if a meaningful opposite exists.' : ''
-    ].filter(Boolean).join(' ');
-    const prompt = 'For English headword ' + JSON.stringify(target) + ', return only the requested related-word lists. ' +
-      wanted + ' Return JSON only: {"synonyms":["English"],"antonyms":["English"]}. ' +
-      'English terms only; no meanings or explanations. Use [] only if no reasonable answer exists.';
-
-    try {
-      let raw = '';
-      if (this.chatProvider === 'avalai') {
-        if (!this.AVALAI_API_KEY) return { synonyms: [], antonyms: [] };
-        const response = await fetch('https://api.avalai.ir/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + this.AVALAI_API_KEY, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'gpt-4o-mini',
-            messages: [{ role: 'user', content: prompt }],
-            response_format: { type: 'json_object' },
-            temperature: 0.1,
-            max_tokens: 80
-          })
-        });
-        if (!response.ok) throw new Error('Avalai related-terms API returned HTTP ' + response.status);
-        raw = (await response.json()).choices?.[0]?.message?.content || '';
-      } else if (this.chatProvider === 'openrouter') {
-        if (!this.OPENROUTER_API_KEY) return { synonyms: [], antonyms: [] };
-        const response = await fetch('/local-api/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': 'Bearer ' + this.OPENROUTER_API_KEY,
-            'Content-Type': 'application/json',
-            ...(typeof location !== 'undefined' && location.origin && location.origin !== 'null' ? { 'HTTP-Referer': location.origin } : {}),
-            ...(typeof document !== 'undefined' && document.title ? { 'X-Title': document.title } : {})
-          },
-          body: JSON.stringify({
-            model: 'gemma-4-e2b-it',
-            messages: [{ role: 'user', content: prompt }],
-            provider: { data_collection: 'allow' },
-            temperature: 0.1,
-            max_tokens: 80
-          })
-        });
-        if (!response.ok) throw new Error('OpenRouter related-terms API returned HTTP ' + response.status);
-        raw = (await response.json()).choices?.[0]?.message?.content || '';
-      } else {
-        if (!this.API_KEY) return { synonyms: [], antonyms: [] };
-        const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + this.API_KEY, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            generationConfig: { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 96 }
-          })
-        });
-        if (!response.ok) throw new Error('Gemini related-terms API returned HTTP ' + response.status);
-        raw = (await response.json()).candidates?.[0]?.content?.parts?.[0]?.text || '';
-      }
-
-      const normalized = String(raw).trim();
-      const startIndex = normalized.indexOf('{');
-      const endIndex = normalized.lastIndexOf('}');
-      if (startIndex < 0 || endIndex <= startIndex) return { synonyms: [], antonyms: [] };
-      try {
-        const parsed = JSON.parse(normalized.slice(startIndex, endIndex + 1).replace(/,(\s*[}\]])/g, '$1'));
-        return normalizeResponse(parsed);
-      } catch (_) {
-        return { synonyms: [], antonyms: [] };
-      }
-    } catch (error) {
-      console.warn('WordLens related-terms completion failed:', error);
-      return { synonyms: [], antonyms: [] };
-    }
-  }
-
-  async getWordMeaningOpenRouter(word, { forceRefresh = false, requirePersian = false, requireRelatedTerms = false } = {}) {
+  async getWordMeaningOpenRouter(word, { forceRefresh = false, requirePersian = false } = {}) {
     const lowerWord = word.toLowerCase().trim();
     if (!forceRefresh) {
       try {
@@ -3251,21 +3146,17 @@ class AIChatApp {
     }
 
     if (!this.OPENROUTER_API_KEY) {
-      return { meanings: [{ text: `No OpenRouter API Key`, type: "Error" }], synonyms: [], antonyms: [] };
+      return { meanings: [{ text: `No OpenRouter API Key`, type: "Error" }] };
     }
 
-    const prompt = `English–Persian learner dictionary. Be brief, precise and headword-specific.
+    const prompt = `English–Persian learner dictionary. Be brief and precise.
 TARGET: ${JSON.stringify(String(word ?? "").trim())}
-Return one JSON object with exactly: meanings, synonyms, antonyms.
-meanings: 1–4 common distinct senses as warranted; each item has text containing the actual Persian translation in Persian script and type containing a short Persian part-of-speech label. Do not put an English definition in the meaning text.
-synonyms: 2–3 useful English synonyms or near-synonyms for the main sense.
-antonyms: 1–3 common English opposites if a meaningful opposite exists; use [] only when no reasonable opposite exists.
-Related terms must be English only. No duplicate items, labels, explanations, Markdown or extra keys.
-${requirePersian ? "CORRECTION: The prior meaning was not Persian. Put a natural Persian translation in Persian script in every meanings[].text field; English definitions are invalid." : ""}
-${requireRelatedTerms ? "RELATED-TERMS MODE: Focus on useful synonyms and meaningful opposites for this exact word. Do not default to empty arrays. The terms must be English. Keep meanings concise and Persian." : ""}
+Return JSON only with exactly one key: meanings.
+meanings: 1–4 common distinct senses as warranted; each item has text containing a natural Persian translation in Persian script and type containing a short Persian part-of-speech label. Do not put an English definition in the meaning text.
+No duplicate meanings, labels, explanations, Markdown or extra keys.
+${requirePersian ? "CORRECTION: The previous result was not Persian. Every meanings[].text must be a natural Persian translation in Persian script; English definitions are invalid." : ""}
 ${forceRefresh ? "Reassess the word independently; accuracy matters more than novelty." : ""}`;
-
-    const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }], synonyms: [], antonyms: [] });
+    const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }] });
     try {
       const headers = {
         'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
@@ -3336,30 +3227,6 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
         return text.slice(start, end + 1);
       };
 
-      const normalizeWordList = (value) => {
-        const rawItems = Array.isArray(value)
-          ? value
-          : typeof value === 'string'
-            ? value.split(/[,;\n]/g)
-            : Array.isArray(value?.items)
-              ? value.items
-              : Array.isArray(value?.words)
-                ? value.words
-                : [];
-        const seen = new Set();
-        return rawItems
-          .map(item => String(typeof item === 'object' && item !== null ? (item.word ?? item.term ?? item.text ?? '') : item ?? '').trim())
-          .map(s => s.replace(/^["'\s]+|["'\s]+$/g, ''))
-          .filter(s => s && /^[A-Za-z][A-Za-z\s'-]*$/.test(s))
-          .filter(s => {
-            const key = s.toLowerCase();
-            if (seen.has(key)) return false;
-            seen.add(key);
-            return true;
-          })
-          .slice(0, 3);
-      };
-
       const normalizeMeaningResult = (obj) => {
         if (!obj || typeof obj !== 'object') return null;
         if (!Array.isArray(obj.meanings)) return null;
@@ -3374,11 +3241,7 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
 
         if (meanings.length === 0) return null;
 
-        return {
-          meanings,
-          synonyms: normalizeWordList(obj.synonyms ?? obj.synonym ?? obj.near_synonyms ?? obj.synonyms_en ?? obj.similar_words),
-          antonyms: normalizeWordList(obj.antonyms ?? obj.antonym ?? obj.opposites ?? obj.antonyms_en)
-        };
+        return { meanings };
       };
 
       const parsed =
@@ -3403,7 +3266,7 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
     }
   }
 
-  async getWordMeaningAvalai(word, { forceRefresh = false, requirePersian = false, requireRelatedTerms = false } = {}) {
+  async getWordMeaningAvalai(word, { forceRefresh = false, requirePersian = false } = {}) {
     const lowerWord = word.toLowerCase().trim();
     if (!forceRefresh) {
       try {
@@ -3413,20 +3276,16 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
         console.error("Error reading meaning cache:", err);
       }
     }
-    if (!this.AVALAI_API_KEY) return { meanings: [{ text: `No Provider 2 API Key`, type: "Error" }], synonyms: [], antonyms: [] };
+    if (!this.AVALAI_API_KEY) return { meanings: [{ text: `No Provider 2 API Key`, type: "Error" }] };
     
-    const prompt = `English–Persian learner dictionary. Be brief, precise and headword-specific.
+    const prompt = `English–Persian learner dictionary. Be brief and precise.
 TARGET: ${JSON.stringify(String(word ?? "").trim())}
-Return one JSON object with exactly: meanings, synonyms, antonyms.
-meanings: 1–4 common distinct senses as warranted; each item has text containing an actual Persian translation in Persian script and type containing a short Persian part-of-speech label. Do not put an English definition in the meaning text.
-synonyms: 2–3 useful English synonyms or near-synonyms for the main sense.
-antonyms: 1–3 common English opposites if a meaningful opposite exists; use [] only when no reasonable opposite exists.
-Related terms must be English only. No duplicate items, labels, explanations, Markdown or extra keys.
-${requirePersian ? "CORRECTION: The prior meaning was not Persian. Put a natural Persian translation in Persian script in every meanings[].text field; English definitions are invalid." : ""}
-${requireRelatedTerms ? "RELATED-TERMS MODE: Focus on useful synonyms and meaningful opposites for this exact word. Do not default to empty arrays. The terms must be English. Keep meanings concise and Persian." : ""}
-${forceRefresh ? "Reassess the word independently; accuracy matters more than novelty." : ""}`;;
-    
-    const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }], synonyms: [], antonyms: [] });
+Return JSON only with exactly one key: meanings.
+meanings: 1–4 common distinct senses as warranted; each item has text containing a natural Persian translation in Persian script and type containing a short Persian part-of-speech label. Do not put an English definition in the meaning text.
+No duplicate meanings, labels, explanations, Markdown or extra keys.
+${requirePersian ? "CORRECTION: The previous result was not Persian. Every meanings[].text must be a natural Persian translation in Persian script; English definitions are invalid." : ""}
+${forceRefresh ? "Reassess the word independently; accuracy matters more than novelty." : ""}`;
+    const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }] });
     try {
       const response = await fetch('https://api.avalai.ir/v1/chat/completions', {
         method: 'POST',
@@ -3438,8 +3297,15 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
       const text = data.choices?.[0]?.message?.content;
       if (!text) return returnError("No response from Provider 2 API");
       try {
-        const result = JSON.parse(text);
-        if (!result.meanings || !Array.isArray(result.meanings)) return returnError("Invalid format received");
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed?.meanings)) return returnError("Invalid format received");
+        const result = {
+          meanings: parsed.meanings.map(item => typeof item === 'string'
+            ? { text: item.trim(), type: '' }
+            : { text: String(item?.text ?? item?.meaning ?? '').trim(), type: String(item?.type ?? item?.part_of_speech ?? '').trim() })
+            .filter(item => item.text).slice(0, 5)
+        };
+        if (!result.meanings.length) return returnError("Invalid format received");
         await this.db.set('word_meanings', { word: lowerWord, promptVersion: window.WORDLENS_WORD_MEANING_PROMPT_VERSION, value: result }).catch(err => console.error("Failed to cache meaning:", err));
         return result;
       } catch (parseError) {
@@ -3452,7 +3318,7 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
     }
   }
 
-  async getWordMeaningGemini(word, { forceRefresh = false, requirePersian = false, requireRelatedTerms = false } = {}) {
+  async getWordMeaningGemini(word, { forceRefresh = false, requirePersian = false } = {}) {
     const lowerWord = word.toLowerCase().trim();
     if (!forceRefresh) {
       try {
@@ -3462,20 +3328,16 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
         console.error("Error reading meaning cache:", err);
       }
     }
-    if (!this.API_KEY) return { meanings: [{ text: `No API Key`, type: "Error" }], synonyms: [], antonyms: [] };
+    if (!this.API_KEY) return { meanings: [{ text: `No API Key`, type: "Error" }] };
     
-    const prompt = `English–Persian learner dictionary. Be brief, precise and headword-specific.
+    const prompt = `English–Persian learner dictionary. Be brief and precise.
 TARGET: ${JSON.stringify(String(word ?? "").trim())}
-Return one JSON object with exactly: meanings, synonyms, antonyms.
-meanings: 1–4 common distinct senses as warranted; each item has text containing an actual Persian translation in Persian script and type containing a short Persian part-of-speech label. Do not put an English definition in the meaning text.
-synonyms: 2–3 useful English synonyms or near-synonyms for the main sense.
-antonyms: 1–3 common English opposites if a meaningful opposite exists; use [] only when no reasonable opposite exists.
-Related terms must be English only. No duplicate items, labels, explanations, Markdown or extra keys.
-${requirePersian ? "CORRECTION: The prior meaning was not Persian. Put a natural Persian translation in Persian script in every meanings[].text field; English definitions are invalid." : ""}
-${requireRelatedTerms ? "RELATED-TERMS MODE: Focus on useful synonyms and meaningful opposites for this exact word. Do not default to empty arrays. The terms must be English. Keep meanings concise and Persian." : ""}
-${forceRefresh ? "Reassess the word independently; accuracy matters more than novelty." : ""}`;;
-    
-    const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }], synonyms: [], antonyms: [] });
+Return JSON only with exactly one key: meanings.
+meanings: 1–4 common distinct senses as warranted; each item has text containing a natural Persian translation in Persian script and type containing a short Persian part-of-speech label. Do not put an English definition in the meaning text.
+No duplicate meanings, labels, explanations, Markdown or extra keys.
+${requirePersian ? "CORRECTION: The previous result was not Persian. Every meanings[].text must be a natural Persian translation in Persian script; English definitions are invalid." : ""}
+${forceRefresh ? "Reassess the word independently; accuracy matters more than novelty." : ""}`;
+    const returnError = (message) => ({ meanings: [{ text: message, type: "Error" }] });
     try {
       const modelName = "gemini-2.5-flash-lite";
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${this.API_KEY}`, {
@@ -3491,8 +3353,15 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
       const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!text) return returnError("No response from API");
       try {
-        const result = JSON.parse(text);
-        if (!result.meanings || !Array.isArray(result.meanings)) return returnError("Invalid format received");
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed?.meanings)) return returnError("Invalid format received");
+        const result = {
+          meanings: parsed.meanings.map(item => typeof item === 'string'
+            ? { text: item.trim(), type: '' }
+            : { text: String(item?.text ?? item?.meaning ?? '').trim(), type: String(item?.type ?? item?.part_of_speech ?? '').trim() })
+            .filter(item => item.text).slice(0, 5)
+        };
+        if (!result.meanings.length) return returnError("Invalid format received");
         await this.db.set('word_meanings', { word: lowerWord, promptVersion: window.WORDLENS_WORD_MEANING_PROMPT_VERSION, value: result }).catch(err => console.error("Failed to cache meaning:", err));
         return result;
       } catch (parseError) {
@@ -3515,8 +3384,6 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
 
     const titleEl = newPopup.querySelector("#word-meaning-title");
     const meaningsListEl = newPopup.querySelector("#meanings-list");
-    const synonymsListEl = newPopup.querySelector("#synonyms-list");
-    const antonymsListEl = newPopup.querySelector("#antonyms-list");
     const closeBtn = newPopup.querySelector("#close-word-meaning");
     const playAudioBtn = newPopup.querySelector("#play-word-audio-btn");
     const retryMeaningBtn = newPopup.querySelector("#retry-word-meaning-btn");
@@ -3575,72 +3442,16 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
     
     addToLeitnerBtn.addEventListener('click', () => this.addCurrentWordToLeitner(word));
 
-    const playWordItemAudio = (event) => {
-        const button = event.target.closest('.btn-audio-word-item');
-        if (button) {
-            event.stopPropagation();
-            const text = button.dataset.text;
-            if (text) {
-                this.playTextToSpeech(text, button, null, null);
-            }
-        }
-    };
-    synonymsListEl.addEventListener('click', playWordItemAudio);
-    antonymsListEl.addEventListener('click', playWordItemAudio);
-    
-    const handleWordClick = (event) => {
-      if (event.target.classList.contains('clickable-word')) {
-          // Clean the word before showing meaning
-          const rawWord = event.target.textContent.trim();
-          const cleanWord = rawWord.replace(/^[^\w]+|[^\w]+$/g, '').replace(/[^\w\s'-]/g, '').toLowerCase();
-          if (cleanWord) {
-              this.showWordMeaning(cleanWord);
-          }
-      }
-    };
-    synonymsListEl.addEventListener('click', handleWordClick);
-    antonymsListEl.addEventListener('click', handleWordClick);
-
-    const renderWordList = (listElement, wordList, itemClass) => {
-      listElement.replaceChildren();
-      if (Array.isArray(wordList) && wordList.length > 0) {
-        wordList.forEach(itemWord => {
-          const container = document.createElement("div");
-          container.className = `${itemClass}-container`;
-          const span = document.createElement("span");
-          span.className = `${itemClass} clickable-word`;
-          span.textContent = String(itemWord ?? "");
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "btn-icon btn-audio-word-item";
-          button.dataset.text = String(itemWord ?? "");
-          button.title = `Play ${itemWord}`;
-          button.setAttribute("aria-label", `Play ${itemWord}`);
-          button.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon></svg>`;
-          container.appendChild(span);
-          container.appendChild(button);
-          listElement.appendChild(container);
-        });
-      } else {
-        const empty = document.createElement("span");
-        empty.className = `${itemClass}-item`;
-        empty.textContent = itemClass === 'synonym-item' ? 'No synonyms found' : 'No antonyms found';
-        listElement.appendChild(empty);
-      }
-    };
-
     const renderMeaningData = (meaningData) => {
       meaningsListEl.replaceChildren();
       const meanings = Array.isArray(meaningData?.meanings) ? meaningData.meanings : [];
-      const isError = meanings.length === 0 || meanings[0]?.type === "Error";
+      const isError = meanings.length === 0 || /^(?:error|خطا)$/i.test(String(meanings[0]?.type ?? '').trim());
 
       if (isError) {
         const error = document.createElement("div");
         error.className = "meaning-item";
         error.textContent = meanings[0]?.text || "Meaning not found";
         meaningsListEl.appendChild(error);
-        renderWordList(synonymsListEl, [], "synonym-item");
-        renderWordList(antonymsListEl, [], "antonym-item");
         return;
       }
 
@@ -3657,9 +3468,6 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
         div.appendChild(typeEl);
         meaningsListEl.appendChild(div);
       });
-
-      renderWordList(synonymsListEl, meaningData.synonyms, "synonym-item");
-      renderWordList(antonymsListEl, meaningData.antonyms, "antonym-item");
     };
 
     let meaningRequestVersion = 0;
@@ -3676,96 +3484,12 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
       loading.className = "meaning-item";
       loading.textContent = forceRefresh ? "Getting a fresh meaning…" : "Loading meaning…";
       meaningsListEl.replaceChildren(loading);
-      synonymsListEl.replaceChildren();
-      antonymsListEl.replaceChildren();
 
       try {
         const meaningData = await this.getWordMeaning(word, { forceRefresh });
         if (!newPopup.isConnected || requestVersion !== meaningRequestVersion) return;
         renderMeaningData(meaningData);
 
-        // Show the accurate Persian meanings immediately. If either English
-        // related-word list is missing, fill only that list in the background.
-        const popupError = !Array.isArray(meaningData?.meanings) ||
-          !meaningData.meanings.length ||
-          /^(?:error|خطا)$/i.test(String(meaningData.meanings[0]?.type ?? '').trim());
-        if (!popupError) {
-          const popupTerms = value => {
-            const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[,;\n]/g) : [];
-            const seen = new Set();
-            return list.map(item => String(typeof item === 'object' && item !== null
-              ? (item.word ?? item.term ?? item.text ?? '') : item ?? '').trim())
-              .filter(item => /^[A-Za-z][A-Za-z\s'-]*$/.test(item))
-              .filter(item => {
-                const key = item.toLowerCase();
-                if (seen.has(key)) return false;
-                seen.add(key);
-                return true;
-              }).slice(0, 3);
-          };
-          const synonyms = popupTerms(meaningData.synonyms ?? meaningData.synonym ?? meaningData.near_synonyms);
-          const antonyms = popupTerms(meaningData.antonyms ?? meaningData.antonym ?? meaningData.opposites);
-          const needSynonyms = synonyms.length === 0;
-          const needAntonyms = antonyms.length === 0;
-          if (needSynonyms || needAntonyms) {
-            if (needSynonyms) synonymsListEl.replaceChildren(Object.assign(document.createElement('span'), {
-              className: 'synonym-item',
-              textContent: 'Finding English synonyms…'
-            }));
-            if (needAntonyms) antonymsListEl.replaceChildren(Object.assign(document.createElement('span'), {
-              className: 'antonym-item',
-              textContent: 'Finding English antonyms…'
-            }));
-
-            if (!(this._wordLensRelatedTermsInFlight instanceof Map)) this._wordLensRelatedTermsInFlight = new Map();
-            const requestKey = String(word ?? '').trim().toLowerCase() + '|s' + Number(needSynonyms) + '|a' + Number(needAntonyms);
-            let relatedRequest = this._wordLensRelatedTermsInFlight.get(requestKey);
-            if (!relatedRequest) {
-              relatedRequest = Promise.resolve().then(() =>
-                this.getWordRelatedTerms(word, { needSynonyms, needAntonyms })
-              );
-              this._wordLensRelatedTermsInFlight.set(requestKey, relatedRequest);
-              relatedRequest.then(() => {
-                if (this._wordLensRelatedTermsInFlight?.get(requestKey) === relatedRequest) {
-                  this._wordLensRelatedTermsInFlight.delete(requestKey);
-                }
-              }, () => {
-                if (this._wordLensRelatedTermsInFlight?.get(requestKey) === relatedRequest) {
-                  this._wordLensRelatedTermsInFlight.delete(requestKey);
-                }
-              });
-            }
-
-            relatedRequest.then(related => {
-              if (!newPopup.isConnected || requestVersion !== meaningRequestVersion) return;
-              const extraSynonyms = popupTerms(related?.synonyms ?? related?.synonym ?? related?.near_synonyms);
-              const extraAntonyms = popupTerms(related?.antonyms ?? related?.antonym ?? related?.opposites);
-              const finalSynonyms = synonyms.length ? synonyms : extraSynonyms;
-              const finalAntonyms = antonyms.length ? antonyms : extraAntonyms;
-              renderWordList(synonymsListEl, finalSynonyms, 'synonym-item');
-              renderWordList(antonymsListEl, finalAntonyms, 'antonym-item');
-
-              if (finalSynonyms.length || finalAntonyms.length) {
-                const updatedMeaningData = {
-                  ...meaningData,
-                  synonyms: finalSynonyms,
-                  antonyms: finalAntonyms
-                };
-                this.db.set('word_meanings', {
-                  word: String(word ?? '').trim().toLowerCase(),
-                  promptVersion: window.WORDLENS_WORD_MEANING_PROMPT_VERSION,
-                  value: updatedMeaningData
-                }).catch(error => console.debug('Related-word cache update failed:', error));
-              }
-            }).catch(error => {
-              console.debug('Background related-word request failed:', error);
-              if (newPopup.isConnected && requestVersion === meaningRequestVersion) {
-                renderWordList(synonymsListEl, synonyms, 'synonym-item');
-                renderWordList(antonymsListEl, antonyms, 'antonym-item');
-              }
-            });
-          }
-        }
       } catch (error) {
         console.error("Failed to load word meaning:", error);
         if (!newPopup.isConnected || requestVersion !== meaningRequestVersion) return;
@@ -3773,8 +3497,6 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
         errorItem.className = "meaning-item";
         errorItem.textContent = error?.message || "Unable to load the meaning. Please try again.";
         meaningsListEl.replaceChildren(errorItem);
-        renderWordList(synonymsListEl, [], "synonym-item");
-        renderWordList(antonymsListEl, [], "antonym-item");
       } finally {
         if (newPopup.isConnected && requestVersion === meaningRequestVersion && retryMeaningBtn) {
           retryMeaningBtn.disabled = false;
