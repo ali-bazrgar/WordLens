@@ -2625,40 +2625,82 @@ class AIChatApp {
 
   async sendMessage() {
     const text = this.messageInput.value.trim();
-    if (!text || !this.currentChatId || this.isLoading) return;
-    this.addMessage("user", text);
-    this.messageInput.value = "";
+    if (!text || !this.currentChatId) return;
+
+    // If another response is still being generated, remember the send action
+    // instead of silently dropping it. The typed text stays in the input.
+    if (this.isLoading) {
+      this._sendQueuedAfterCurrent = true;
+      return;
+    }
+
+    const requestChatId = this.currentChatId;
+    this.isLoading = true;
+    this.sendBtn?.classList.add('is-sending');
+    this.sendBtn?.setAttribute('aria-busy', 'true');
+    this.addMessage('user', text);
+    this.messageInput.value = '';
     this.adjustTextareaHeight();
-    const loadingWrapper = document.createElement("div");
-    loadingWrapper.className = "message-wrapper ai";
-    const loadingDiv = document.createElement("div");
-    loadingDiv.className = "message ai";
+
+    const loadingWrapper = document.createElement('div');
+    loadingWrapper.className = 'message-wrapper ai';
+    loadingWrapper.dataset.requestChatId = requestChatId;
+    const loadingDiv = document.createElement('div');
+    loadingDiv.className = 'message ai';
     loadingDiv.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
     loadingWrapper.appendChild(loadingDiv);
     this.messagesDiv.appendChild(loadingWrapper);
     this.scrollToBottom();
-    this.isLoading = true;
+
+    const storeReplyForChat = (chat, role, content) => {
+      if (!chat) return;
+      chat.messages.push({
+        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        role,
+        content,
+        timestamp: new Date().toISOString()
+      });
+      this.saveChats();
+    };
+
     try {
       const response = await this.callChatAPI(text);
-      const aiText = response;
       loadingWrapper.remove();
-      this.addMessage("ai", aiText);
-      const chat = this.chats.find(c => c.id === this.currentChatId);
-      if (chat && chat.messages.length === 2 && !chat.title.includes('(Imported)')) {
-        chat.title = text.substring(0, 30) + (text.length > 30 ? "..." : "");
+      const originChat = this.chats.find(chat => chat.id === requestChatId);
+      if (this.currentChatId === requestChatId) {
+        this.addMessage('ai', response);
+      } else {
+        storeReplyForChat(originChat, 'ai', response);
+      }
+
+      if (originChat && originChat.messages.length === 2 && !String(originChat.title || '').includes('(Imported)')) {
+        originChat.title = text.substring(0, 30) + (text.length > 30 ? '...' : '');
         this.saveChats();
         this.renderChatList();
-        this.chatTitle.textContent = chat.title;
+        if (this.currentChatId === requestChatId) this.chatTitle.textContent = originChat.title;
       }
     } catch (error) {
-      console.error("Error:", error);
+      console.error('Error sending chat message:', error);
       loadingWrapper.remove();
-  this.addMessage("ai", `Error: ${error.message}`);
+      const errorMessage = `Error: ${error?.message || String(error)}`;
+      if (this.currentChatId === requestChatId) {
+        this.addMessage('ai', errorMessage);
+      } else {
+        storeReplyForChat(this.chats.find(chat => chat.id === requestChatId), 'ai', errorMessage);
+      }
     } finally {
       this.isLoading = false;
+      this.sendBtn?.classList.remove('is-sending');
+      this.sendBtn?.removeAttribute('aria-busy');
+
+      if (this._sendQueuedAfterCurrent) {
+        this._sendQueuedAfterCurrent = false;
+        if (this.messageInput.value.trim() && this.currentChatId) {
+          setTimeout(() => this.sendMessage(), 0);
+        }
+      }
     }
   }
-
   async callChatAPI(message) {
     if (this.chatProvider === 'gemini') return this.callGeminiChatAPI(message);
     else if (this.chatProvider === 'avalai') return this.callAvalaiChatAPI(message);
