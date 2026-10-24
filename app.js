@@ -3812,12 +3812,14 @@ Be thorough and comprehensive.`;
     const elapsedDays = lastReview && !Number.isNaN(lastReview.getTime())
       ? Math.max(0, (reviewTime.getTime() - lastReview.getTime()) / 86400000)
       : 0;
+    // FSRS-6 uses elapsed whole days, rounded to the nearest day, for recall estimates.
+    const elapsedWholeDays = Math.round(elapsedDays);
     const isNew = state.state === "new" || !(state.stability > 0) || !lastReview || Number.isNaN(lastReview.getTime());
     const S = Math.max(0.1, state.stability || 0.1);
     const D = clamp(state.difficulty || 5, 1, 10);
     const decay = w[20];
     const factor = Math.pow(0.9, -1 / decay) - 1;
-    const retrievability = isNew ? 1 : Math.pow(1 + factor * elapsedDays / S, -decay);
+    const retrievability = isNew ? 1 : Math.pow(1 + factor * elapsedWholeDays / S, -decay);
 
     const initialDifficulty = G => clamp(w[4] - Math.exp(w[5] * (G - 1)) + 1, 1, 10);
     let nextDifficulty = initialDifficulty(grade);
@@ -3829,13 +3831,14 @@ Be thorough and comprehensive.`;
     let nextStability;
     if (isNew) {
       nextStability = w[grade - 1];
-    } else if (elapsedDays < 1) {
+    } else if (elapsedWholeDays === 0) {
       const sameDayIncrement = Math.exp(w[17] * (grade - 3 + w[18])) * Math.pow(S, -w[19]);
       const candidate = S * sameDayIncrement;
-      nextStability = grade >= 3 ? Math.max(candidate, S) : candidate;
+      nextStability = grade >= 2 ? Math.max(candidate, S) : candidate;
     } else if (grade === 1) {
       const postLapse = w[11] * Math.pow(D, -w[12]) * (Math.pow(S + 1, w[13]) - 1) * Math.exp((1 - retrievability) * w[14]);
-      nextStability = Math.min(postLapse, S);
+      const minimumPostLapse = S / Math.exp(w[17] * w[18]);
+      nextStability = Math.min(postLapse, minimumPostLapse);
     } else {
       const hardPenalty = grade === 2 ? w[15] : 1;
       const easyBonus = grade === 4 ? w[16] : 1;
