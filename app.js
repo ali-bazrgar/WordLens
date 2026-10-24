@@ -301,13 +301,13 @@ class CacheDB {
     if (!this.db) await this.init();
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(storeName, 'readwrite');
-      const store = transaction.objectStore(storeName);
-      const request = store.clear();
-      request.onsuccess = () => resolve();
-      request.onerror = (event) => {
-        console.error(`Error clearing data in ${storeName}:`, event.target.error);
-        reject(event.target.error);
+      transaction.objectStore(storeName).clear();
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => {
+        console.error(`Error clearing data in ${storeName}:`, transaction.error);
+        reject(transaction.error || new Error(`Failed to clear data in ${storeName}`));
       };
+      transaction.onabort = () => reject(transaction.error || new Error(`Clearing data in ${storeName} was aborted`));
     });
   }
 }
@@ -2386,13 +2386,13 @@ class AIChatApp {
       return;
     }
     if (this.ttsProvider === 'avalai' && this.AVALAI_API_KEY) {
-      this.playWithAvalaiTTS(text, button, progressBar);
+      return this.playWithAvalaiTTS(text, button, progressBar);
     } else if (this.ttsProvider === 'gemini' && this.API_KEY) {
-      this.playWithGeminiTTS(text, button, progressBar);
+      return this.playWithGeminiTTS(text, button, progressBar);
     } else if (this.ttsProvider === 'elevenlabs' && this.ELEVENLABS_API_KEY) {
-      this.playWithElevenLabsTTS(text, button, progressBar);
+      return this.playWithElevenLabsTTS(text, button, progressBar);
     } else {
-      this.playWithBrowserTTS(text, button, progressBar, messageId);
+      return this.playWithBrowserTTS(text, button, progressBar, messageId);
     }
   }
 
