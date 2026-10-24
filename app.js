@@ -3329,7 +3329,7 @@ Be thorough and comprehensive.`;
           refreshBtn.disabled = true;
           refreshBtn.classList.add("is-loading");
           refreshBtn.setAttribute("aria-busy", "true");
-          refreshBtn.innerHTML = '<span>Regenerating…</span>';
+          refreshBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"></path><path d="M20 12a8 8 0 1 1-2.34-5.66L20 9"></path></svg><span>Regenerating…</span>';
         }
         meaningsEl.textContent = "Generating a fresh meaning…";
         synonymsEl.replaceChildren();
@@ -3921,34 +3921,46 @@ Be thorough and comprehensive.`;
   }
 
   async rateCard(rating) {
-    if (!this.currentCard) return;
-    const normalizedRating = Math.min(4, Math.max(1, Math.round(Number(rating) || 1)));
-    const reviewedAt = new Date();
-    const result = this.calculateFSRS(this.currentCard, normalizedRating, reviewedAt);
-    const dueDate = new Date(reviewedAt.getTime());
-    if (result.dueMinutes) {
-      dueDate.setTime(reviewedAt.getTime() + result.dueMinutes * 60000);
-    } else {
-      dueDate.setHours(0, 0, 0, 0);
-      dueDate.setDate(dueDate.getDate() + result.interval);
-    }
-    const updatedCard = {
-      ...this.currentCard,
-      repetitions: result.repetitions,
-      interval: result.interval,
-      easeFactor: result.easeFactor,
-      dueDate: dueDate.toISOString(),
-      lastReviewed: reviewedAt.toISOString(),
-      status: result.fsrs.state,
-      fsrs: result.fsrs
-    };
+    if (!this.currentCard || this.isRatingCard) return;
+    this.isRatingCard = true;
+    const ratingButtons = [this.ratingAgainBtn, this.ratingHardBtn, this.ratingGoodBtn, this.ratingEasyBtn].filter(Boolean);
+    ratingButtons.forEach(button => { button.disabled = true; });
 
-    await this.db.set(this.LEITNER_STORE, updatedCard);
-    await this.refreshLeitnerDueCacheForWord(updatedCard.word, this.currentLeitnerScope);
-    // Again is due in ten minutes; do not put it back into this queue immediately.
-    // openLeitnerModal uses the exact timestamp, so it will reappear when genuinely due.
-    this.showNextCard();
+    try {
+      const normalizedRating = Math.min(4, Math.max(1, Math.round(Number(rating) || 1)));
+      const reviewedAt = new Date();
+      const result = this.calculateFSRS(this.currentCard, normalizedRating, reviewedAt);
+      const dueDate = new Date(reviewedAt.getTime());
+      if (result.dueMinutes) {
+        dueDate.setTime(reviewedAt.getTime() + result.dueMinutes * 60000);
+      } else {
+        dueDate.setHours(0, 0, 0, 0);
+        dueDate.setDate(dueDate.getDate() + result.interval);
+      }
+      const updatedCard = {
+        ...this.currentCard,
+        repetitions: result.repetitions,
+        interval: result.interval,
+        easeFactor: result.easeFactor,
+        dueDate: dueDate.toISOString(),
+        lastReviewed: reviewedAt.toISOString(),
+        status: result.fsrs.state,
+        fsrs: result.fsrs
+      };
+
+      await this.db.set(this.LEITNER_STORE, updatedCard);
+      await this.refreshLeitnerDueCacheForWord(updatedCard.word, this.currentLeitnerScope);
+      // Again is due in ten minutes; do not put it back into this queue immediately.
+      this.showNextCard();
+    } catch (error) {
+      console.error("Failed to save FSRS-6 review:", error);
+      this.showToast("The review could not be saved. Your card is still available to retry.", "error");
+    } finally {
+      this.isRatingCard = false;
+      ratingButtons.forEach(button => { button.disabled = false; });
+    }
   }
+
 
   // --- Import/Export ---
   showImportTextModal() { this.importTextModal.classList.remove("hidden"); }
