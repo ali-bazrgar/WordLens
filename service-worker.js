@@ -1,6 +1,6 @@
-const CACHE_NAME = 'wordlens-app-v27-fast-dictionary';
+const CACHE_NAME = 'wordlens-app-v28-meanings-only';
 const APP_BASE = self.registration.scope;
-const APP_VERSION = '20261024-fast-dictionary-v27';
+const APP_VERSION = '20261024-meanings-only-v28';
 
 // The app shell, local data, and flashcards work offline after one successful
 // online visit. API endpoints are intentionally never cached.
