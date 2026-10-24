@@ -843,13 +843,30 @@
       return localCompletion(history.concat([{ role: 'user', content: message }]), {}, requestOptions);
     };
 
-    AIChatApp.prototype.translateTextOpenRouter = async function(text) {
-      const prompt = `Translate this text to Persian/Farsi. Provide only the translation without any additional explanation: "${text}"`;
+    AIChatApp.prototype.translateTextOpenRouter = async function(text, options = {}) {
+      const sourceText = String(text ?? '').trim();
+      const previous = String(options.previousTranslation ?? '').trim();
+      const retryInstruction = options.forceAlternative
+        ? 'The previous attempt repeated the same wording. Produce a genuinely different but accurate Persian/Farsi translation.'
+        : 'This is a fresh translation attempt. Use natural wording and do not repeat the prior translation verbatim.';
+      const prompt = options.refresh
+        ? [
+            'Translate the following source text into natural, accurate Persian/Farsi.',
+            'Return only the translation, without explanation, quotation marks, or commentary.',
+            retryInstruction,
+            previous ? `Previous translation to avoid repeating: "${previous}"` : '',
+            `Source text: "${sourceText}"`,
+            `Request reference: ${options.requestId || Date.now()}`
+          ].filter(Boolean).join('\n')
+        : `Translate this text to Persian/Farsi. Provide only the translation without any additional explanation: "${sourceText}"`;
       try {
-        return await localCompletion([{ role: 'user', content: prompt }], { temperature: 0.2 });
+        return await localCompletion(
+          [{ role: 'user', content: prompt }],
+          { temperature: options.forceAlternative ? 0.95 : options.refresh ? 0.8 : 0.2 }
+        );
       } catch (error) {
         console.error('Local Provider 3 translation error:', error);
-        return 'Translation failed';
+        throw new Error('Local translation failed: ' + (error?.message || String(error)));
       }
     };
 
