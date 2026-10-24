@@ -833,7 +833,15 @@
       }
     };
 
-    AIChatApp.prototype.callOpenRouterChatAPI = async function(message, chatId = this.currentChatId, requestOptions = {}) {
+    AIChatApp.prototype.callOpenRouterChatAPI = async function(message, chatIdOrOptions = this.currentChatId, requestOptions = {}) {
+      // The chat UI passes a chat ID, while the realtime voice path passes { signal }.
+      // Keep both call styles working and never treat an options object as a chat ID.
+      let chatId = chatIdOrOptions;
+      if (chatIdOrOptions && typeof chatIdOrOptions === 'object') {
+        requestOptions = chatIdOrOptions;
+        chatId = this.currentChatId;
+      }
+      if (!chatId) chatId = this.currentChatId;
       if (this.chatProvider !== 'openrouter') throw new Error('Provider 3 is not selected.');
       const chat = this.chats.find(c => c.id === chatId);
       if (!chat) throw new Error('Chat not found');
