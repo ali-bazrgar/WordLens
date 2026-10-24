@@ -1294,7 +1294,15 @@
           catch(ttsError){console.error('Realtime TTS error:',ttsError);session.lastError='Reply is in chat, but speech failed: '+ttsError.message;if(session.active){realtimeSetStatus(this,session.lastError,'error');this.showToast('Live TTS failed: '+ttsError.message,'error');}}
         }
       }catch(error){loadingWrapper.remove();console.error('Realtime LLM error:',error);this.addMessage('ai','Error: '+error.message);session.lastError='LLM error: '+error.message;if(session.active){realtimeSetStatus(this,session.lastError,'error');this.showToast(session.lastError,'error');}}
-      finally{this.isLoading=false;}
+      finally{
+        this.isLoading=false;
+        // If a typed message was queued while live speech was being processed,
+        // flush it here too (the normal sendMessage path has its own finally).
+        if(this._sendQueuedAfterCurrent&&this.messageInput?.value.trim()&&this.currentChatId){
+          this._sendQueuedAfterCurrent=false;
+          setTimeout(()=>this.sendMessage(),0);
+        }
+      }
     };
     const originalSendMessage=AIChatApp.prototype.sendMessage;
     AIChatApp.prototype.sendMessage=function(){if(this.realtimeSession)this.stopRealtimeConversation();return originalSendMessage.call(this);};
