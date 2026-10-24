@@ -5,18 +5,27 @@
   const DEFAULTS = Object.freeze({
     apiMode: 'proxy',
     llmBase: 'http://127.0.0.1:8080',
-    llmModel: 'Hy-MT2-1.8B-2Bit',
+    llmModel: 'hy-mt2-1.8b-en-fa',
     llmApiKey: '',
-    ttsBase: 'http://127.0.0.1:4321',
-    ttsApiKey: '123',
-    ttsModel: 'kitten-tts-mini-0.8',
-    ttsVoice: 'expr-voice-4-m',
+    ttsBase: 'http://127.0.0.1:8082',
+    ttsApiKey: '',
+    ttsModel: 'pocket-tts',
+    ttsVoice: 'clone',
     ttsFormat: 'wav',
     sttProvider: 'openai-compatible',
-    sttBase: '',
+    sttBase: 'http://127.0.0.1:8767',
     sttApiKey: '',
     sttModel: 'whisper-1',
     sttLanguage: 'en'
+  });
+
+  const LEGACY_DEFAULTS = Object.freeze({
+    llmModel: { 'Hy-MT2-1.8B-2Bit': DEFAULTS.llmModel },
+    ttsBase: { 'http://127.0.0.1:4321': DEFAULTS.ttsBase, 'http://127.0.0.1:4321/v1': DEFAULTS.ttsBase },
+    ttsModel: { 'kitten-tts-mini-0.8': DEFAULTS.ttsModel },
+    ttsVoice: { 'expr-voice-4-m': DEFAULTS.ttsVoice },
+    ttsApiKey: { '123': '' },
+    sttBase: { '': DEFAULTS.sttBase }
   });
 
   const getCfg = (key) => {
@@ -24,7 +33,15 @@
     if (stored !== null) {
       const value = stored.toString().trim();
       if (value === '/local-api' && ['llmBase', 'ttsBase', 'sttBase'].includes(key)) {
-        return (DEFAULTS[key] ?? '').toString().trim();
+        const fallback = (DEFAULTS[key] ?? '').toString().trim();
+        setCfg(key, fallback);
+        return fallback;
+      }
+      const legacy = LEGACY_DEFAULTS[key];
+      if (legacy && Object.prototype.hasOwnProperty.call(legacy, value)) {
+        const migrated = legacy[value];
+        setCfg(key, migrated);
+        return migrated;
       }
       return value;
     }
@@ -109,16 +126,60 @@
     const headers = { 'Content-Type': 'application/json', 'Accept': 'audio/*, application/octet-stream' };
     const apiKey = getCfg('ttsApiKey');
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
+    const payload = {
+      model: getCfg('ttsModel') || DEFAULTS.ttsModel,
+      input: String(text ?? ''),
+      voice: getCfg('ttsVoice') || DEFAULTS.ttsVoice,
+      response_format: getCfg('ttsFormat') || DEFAULTS.ttsFormat
+    };
     const response = await fetch(base + '/audio/speech', {
-      method: 'POST', headers,
-      body: JSON.stringify({ model: getCfg('ttsModel') || DEFAULTS.ttsModel, input: String(text ?? ''), voice: getCfg('ttsVoice') || DEFAULTS.ttsVoice, response_format: getCfg('ttsFormat') || DEFAULTS.ttsFormat })
+      method: 'POST', headers, body: JSON.stringify(payload)
     });
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error('OpenAI-compatible TTS API error: ' + response.status + ', ' + errorText);
+    if (response.ok) {
+      const blob = await response.blob();
+      if (!blob.size) throw new Error('Pocket TTS returned an empty audio file.');
+      return blob;
     }
-    const blob = await response.blob();
-    if (!blob.size) throw new Error('OpenAI-compatible TTS returned an empty audio file.');
+    const errorText = await response.text();
+
+    // Official Kyutai Pocket TTS exposes POST /tts as multipart/form-data,
+    // while OpenAI-compatible wrappers expose /v1/audio/speech. Support both.
+    const tryNativePocketTTS = [400, 404, 405, 415, 422, 501].includes(response.status);
+    if (!tryNativePocketTTS) {
+      throw new Error('Pocket TTS API error: ' + response.status + ', ' + errorText);
+    }
+    const nativeRoot = getCfg('apiMode') === 'direct'
+      ? normalizeBase(getCfg('ttsBase')).replace(/\/v1$/i, '')
+      : '/local-api';
+    const nativeForm = new FormData();
+    nativeForm.append('text', String(text ?? ''));
+    const voice = getCfg('ttsVoice') || 'clone';
+    // Native Pocket TTS gets its clone from the server's configured default voice.
+    // Built-in/URL voices are passed explicitly; arbitrary labels such as "clone"
+    // are IDs for OpenAI-compatible wrappers, not valid native voice URLs.
+    const nativeVoiceNames = new Set([
+      'alba','anna','azelma','bill_boerst','caro_davy','charles','cosette','eponine',
+      'eve','fantine','george','jane','javert','jean','marius','mary','michael','paul',
+      'peter_yearsley','stuart_bell','vera','giovanni','lola','juergen','rafael','estelle'
+    ]);
+    if (/^(https?:\/\/|hf:\/\/)/i.test(voice) || nativeVoiceNames.has(voice.toLowerCase())) {
+      nativeForm.append('voice_url', voice);
+    }
+    const nativeHeaders = { 'Accept': 'audio/wav, audio/*, application/octet-stream' };
+    if (apiKey) nativeHeaders.Authorization = 'Bearer ' + apiKey;
+    const nativeResponse = await fetch(nativeRoot + '/tts', {
+      method: 'POST', headers: nativeHeaders, body: nativeForm
+    });
+    if (!nativeResponse.ok) {
+      const nativeError = await nativeResponse.text();
+      throw new Error(
+        'Pocket TTS failed on /v1/audio/speech (' + response.status + ': ' + errorText +
+        ') and native /tts (' + nativeResponse.status + ': ' + nativeError + '). ' +
+        'For the native endpoint, configure the cloned voice as the Pocket TTS server default.'
+      );
+    }
+    const blob = await nativeResponse.blob();
+    if (!blob.size) throw new Error('Pocket TTS native /tts returned an empty audio file.');
     return blob;
   };
 
@@ -320,13 +381,13 @@
       <p style="margin:14px 0 4px;font-weight:700;">2. TTS — Spoken replies</p>
       <label style="display:block;margin:8px 0 4px;">TTS Base URL</label>
       <input type="text" id="local-tts-base-url" placeholder="http://127.0.0.1:PORT or .../v1">
-      <small style="color:#666;display:block;margin-top:4px;">Upstream address sent to <code>/v1/audio/speech</code>.</small>
+      <small style="color:#666;display:block;margin-top:4px;">Uses the OpenAI-compatible <code>/v1/audio/speech</code> route first, then the native Pocket TTS <code>/tts</code> route when needed.</small>
       <label style="display:block;margin:8px 0 4px;">TTS Model</label>
-      <input type="text" id="local-tts-model" placeholder="kitten-tts-mini-0.8">
+      <input type="text" id="local-tts-model" placeholder="pocket-tts">
       <label style="display:block;margin:8px 0 4px;">TTS API Key (optional)</label>
       <input type="password" id="local-tts-api-key" placeholder="Bearer token, if required">
       <label style="display:block;margin:8px 0 4px;">TTS Voice</label>
-      <input type="text" id="local-tts-voice" placeholder="expr-voice-4-m">
+      <input type="text" id="local-tts-voice" placeholder="clone">
       <label style="display:block;margin:8px 0 4px;">TTS Response Format</label>
       <input type="text" id="local-tts-format" placeholder="wav">
       <p style="margin:14px 0 4px;font-weight:700;">3. STT — Transcription and live conversation</p>
