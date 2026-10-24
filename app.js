@@ -2982,14 +2982,14 @@ class AIChatApp {
     return history.slice(-10);
   }
 
-  async callChatAPI(message, chatId = this.currentChatId) {
-    if (this.chatProvider === 'gemini') return this.callGeminiChatAPI(message, chatId);
-    if (this.chatProvider === 'avalai') return this.callAvalaiChatAPI(message, chatId);
-    if (this.chatProvider === 'openrouter') return this.callOpenRouterChatAPI(message, chatId);
+  async callChatAPI(message, chatId = this.currentChatId, requestOptions = {}) {
+    if (this.chatProvider === 'gemini') return this.callGeminiChatAPI(message, chatId, requestOptions);
+    if (this.chatProvider === 'avalai') return this.callAvalaiChatAPI(message, chatId, requestOptions);
+    if (this.chatProvider === 'openrouter') return this.callOpenRouterChatAPI(message, chatId, requestOptions);
     throw new Error("No chat provider selected or API key is missing.");
   }
 
-  async callGeminiChatAPI(message, chatId = this.currentChatId) {
+  async callGeminiChatAPI(message, chatId = this.currentChatId, requestOptions = {}) {
     if (!this.API_KEY) throw new Error("Provider 1 API key is not set.");
     const chat = this.chats.find(item => item.id === chatId);
     if (!chat) throw new Error("Chat not found");
@@ -3005,7 +3005,8 @@ class AIChatApp {
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${this.API_KEY}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody)
+      body: JSON.stringify(requestBody),
+      signal: requestOptions?.signal
     });
     if (!response.ok) {
       const errorText = await response.text();
@@ -3022,7 +3023,7 @@ class AIChatApp {
     return answer;
   }
 
-  async callAvalaiChatAPI(message, chatId = this.currentChatId) {
+  async callAvalaiChatAPI(message, chatId = this.currentChatId, requestOptions = {}) {
     if (!this.AVALAI_API_KEY) throw new Error("Provider 2 API key is not set.");
     const chat = this.chats.find(item => item.id === chatId);
     if (!chat) throw new Error("Chat not found");
@@ -3045,7 +3046,8 @@ class AIChatApp {
         'Authorization': `Bearer ${this.AVALAI_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(requestBody)
+      body: JSON.stringify(requestBody),
+      signal: requestOptions?.signal
     });
     if (!response.ok) {
       const errorText = await response.text();
@@ -3059,7 +3061,7 @@ class AIChatApp {
     return answer;
   }
 
-  async callOpenRouterChatAPI(message, chatId = this.currentChatId) {
+  async callOpenRouterChatAPI(message, chatId = this.currentChatId, requestOptions = {}) {
     if (!this.OPENROUTER_API_KEY) throw new Error("OpenRouter API key is not set.");
     const chat = this.chats.find(item => item.id === chatId);
     if (!chat) throw new Error("Chat not found");
@@ -3096,7 +3098,8 @@ class AIChatApp {
     const response = await fetch('/local-api/chat/completions', {
       method: 'POST',
       headers,
-      body: JSON.stringify(requestBody)
+      body: JSON.stringify(requestBody),
+      signal: requestOptions?.signal
     });
     if (!response.ok) {
       const errorText = await response.text();
