@@ -3752,100 +3752,100 @@ Be thorough and comprehensive.`;
     }
   }
   
-  // SM-2 Algorithm Implementation (Standard Spaced Repetition)
-  calculateSM2(card, quality) {
-    /*
-     * Anki SM-2 Algorithm with Learning Steps
-     * quality: 0-5 where:
-     *   0: Again (Complete blackout)
-     *   2: Hard (Correct with hesitation)  
-     *   3: Good (Correct response)
-     *   5: Easy (Perfect recall)
-     */
-    
-    let { repetitions, interval, easeFactor } = card;
-    
-    // Ensure defaults
-    repetitions = repetitions || 0;
-    interval = interval || 0;
-    easeFactor = easeFactor || 2.5;
-    
-    let newRepetitions;
-    let newInterval;
-    let newEaseFactor;
-    
-    // Again button (quality=0) - Failed card
-    if (quality === 0) {
-      // Failed card - reset to learning
-      newRepetitions = 0;
-      // Again button shows card in same session for new cards, tomorrow for review cards
-      if (repetitions === 0) {
-        newInterval = 0; // Show again soon in same session
-      } else {
-        newInterval = 1; // Review tomorrow for lapsed cards
-      }
-      newEaseFactor = Math.max(1.3, easeFactor - 0.2); // Decrease ease factor
+  // FSRS-6, using the published 21 default parameters (desired retention: 0.90).
+  calculateFSRS(card, rating, reviewTime = new Date()) {
+    const w = [0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001, 1.8722, 0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425, 0.0912, 0.0658, 0.1542];
+    const clamp = (x, min, max) => Math.min(max, Math.max(min, x));
+    const grade = clamp(Math.round(Number(rating) || 1), 1, 4);
+    const state = this.normalizeFSRSState(card, card?.lastReviewed, card?.repetitions || 0, card?.interval || 0);
+    const lastReview = state.lastReview ? new Date(state.lastReview) : null;
+    const elapsedDays = lastReview && !Number.isNaN(lastReview.getTime())
+      ? Math.max(0, (reviewTime.getTime() - lastReview.getTime()) / 86400000)
+      : 0;
+    const isNew = state.state === "new" || !(state.stability > 0) || !lastReview || Number.isNaN(lastReview.getTime());
+    const S = Math.max(0.1, state.stability || 0.1);
+    const D = clamp(state.difficulty || 5, 1, 10);
+    const decay = w[20];
+    const factor = Math.pow(0.9, -1 / decay) - 1;
+    const retrievability = isNew ? 1 : Math.pow(1 + factor * elapsedDays / S, -decay);
+
+    const initialDifficulty = G => clamp(w[4] - Math.exp(w[5] * (G - 1)) + 1, 1, 10);
+    let nextDifficulty = initialDifficulty(grade);
+    if (!isNew) {
+      const dampedDifficulty = D + (-w[6] * (grade - 3)) * ((10 - D) / 9);
+      nextDifficulty = clamp(w[7] * initialDifficulty(4) + (1 - w[7]) * dampedDifficulty, 1, 10);
+    }
+
+    let nextStability;
+    if (isNew) {
+      nextStability = w[grade - 1];
+    } else if (elapsedDays < 1) {
+      const sameDayIncrement = Math.exp(w[17] * (grade - 3 + w[18])) * Math.pow(S, -w[19]);
+      const candidate = S * sameDayIncrement;
+      nextStability = grade >= 3 ? Math.max(candidate, S) : candidate;
+    } else if (grade === 1) {
+      const postLapse = w[11] * Math.pow(D, -w[12]) * (Math.pow(S + 1, w[13]) - 1) * Math.exp((1 - retrievability) * w[14]);
+      nextStability = Math.min(postLapse, S);
     } else {
-      // Passed card (Hard, Good, or Easy)
-      // Calculate new ease factor: EF' = EF + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
-      newEaseFactor = Math.max(1.3, easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)));
-      
-      if (repetitions === 0) {
-        // First successful review (Learning -> Graduated)
-        if (quality === 5) {
-          // Easy button on new card - graduate immediately with longer interval
-          newInterval = 4; // Anki default: 4 days for easy on new cards
-          newRepetitions = 2; // Skip learning phase entirely
-        } else if (quality === 2) {
-          // Hard button on new card - graduate but with shorter interval
-          newInterval = 1;
-          newRepetitions = 1; // Graduate to review stage
-        } else {
-          // Good button on new card - graduate to review
-          newInterval = 1; // Graduate with 1 day interval
-          newRepetitions = 1;
-        }
-      } else if (repetitions === 1) {
-        // Second successful review (first review after graduating)
-        if (quality === 5) {
-          // Easy button - bonus multiplier
-          newInterval = Math.round(interval * newEaseFactor * 1.3);
-        } else if (quality === 2) {
-          // Hard button - slightly longer than current
-          newInterval = Math.max(2, Math.round(interval * 1.2)); // At least 2 days
-        } else {
-          // Good button
-          newInterval = 6; // Anki default graduating interval (2nd review)
-        }
-        newRepetitions = 2;
-      } else {
-        // Mature card (repetitions >= 2)
-        if (quality === 5) {
-          // Easy button - bonus multiplier
-          newInterval = Math.round(interval * newEaseFactor * 1.3);
-        } else if (quality === 2) {
-          // Hard button - multiply by 1.2
-          newInterval = Math.max(Math.round(interval * 1.2), interval + 1);
-        } else {
-          // Good button - normal interval
-          newInterval = Math.round(interval * newEaseFactor);
-        }
-        newRepetitions = repetitions + 1;
-      }
+      const hardPenalty = grade === 2 ? w[15] : 1;
+      const easyBonus = grade === 4 ? w[16] : 1;
+      nextStability = S * (1 + Math.exp(w[8]) * (11 - D) * Math.pow(S, -w[9]) * (Math.exp((1 - retrievability) * w[10]) - 1) * hardPenalty * easyBonus);
     }
-    
-    // Ensure interval is never 0 except for same-session reviews (Again button)
-    if (newInterval === 0 && quality > 0) {
-      newInterval = 1;
-    }
-    
+    nextStability = clamp(Number.isFinite(nextStability) ? nextStability : 0.1, 0.1, 36500);
+
+    const desiredRetention = 0.9;
+    let intervalDays = Math.round((nextStability / factor) * (Math.pow(desiredRetention, -1 / decay) - 1));
+    intervalDays = clamp(Number.isFinite(intervalDays) ? intervalDays : 1, 1, 36500);
+    const isAgain = grade === 1;
+    if (isAgain) intervalDays = 0; // App-level short learning step; stability remains governed by FSRS-6.
+
+    const reviewedAt = reviewTime.toISOString();
+    const nextState = isAgain ? (isNew ? "learning" : "relearning") : "review";
+    const reps = state.reps + 1;
+    const lapses = state.lapses + (isAgain && !isNew ? 1 : 0);
+    const logEntry = {
+      rating: grade,
+      reviewedAt,
+      elapsedDays: Number(elapsedDays.toFixed(4)),
+      scheduledDays: intervalDays,
+      stability: Number(nextStability.toFixed(4)),
+      difficulty: Number(nextDifficulty.toFixed(4)),
+      retrievability: Number(retrievability.toFixed(4)),
+      stateBefore: state.state,
+      stateAfter: nextState
+    };
+    const fsrs = {
+      version: 6,
+      stability: nextStability,
+      difficulty: nextDifficulty,
+      state: nextState,
+      reps,
+      lapses,
+      lastReview: reviewedAt,
+      scheduledDays: intervalDays,
+      elapsedDays,
+      retrievability,
+      desiredRetention,
+      reviewLog: [...(state.reviewLog || []), logEntry].slice(-50)
+    };
     return {
-      repetitions: newRepetitions,
-      interval: newInterval,
-      easeFactor: newEaseFactor
+      fsrs,
+      repetitions: reps,
+      interval: intervalDays,
+      easeFactor: clamp(2.5 - ((nextDifficulty - 1) / 9) * 1.2, 1.3, 2.5),
+      dueMinutes: isAgain ? 10 : 0,
+      retrievability,
+      stability: nextStability,
+      difficulty: nextDifficulty
     };
   }
-  
+
+  // Compatibility wrapper for imports or older code that still calls this name.
+  calculateSM2(card, quality) {
+    const grade = quality === 0 ? 1 : quality === 2 ? 2 : quality === 5 ? 4 : 3;
+    return this.calculateFSRS(card, grade);
+  }
+
   formatInterval(days) {
     if (!days || days < 1) return `<1d`;
     if (days === 1) return `1 day`;
@@ -3859,82 +3859,49 @@ Be thorough and comprehensive.`;
   
   updateRatingButtons() {
     if (!this.currentCard) return;
-    
-    const card = this.currentCard;
-    
-    // Calculate what would happen with each rating
-    const againResult = this.calculateSM2(card, 0);
-    const hardResult = this.calculateSM2(card, 2);
-    const goodResult = this.calculateSM2(card, 3);
-    const easyResult = this.calculateSM2(card, 5);
-    
-    // Update button labels with intervals and keyboard shortcuts
-    this.ratingAgainBtn.innerHTML = `Again<br><small>${this.formatInterval(againResult.interval)} (1)</small>`;
-    this.ratingHardBtn.innerHTML = `Hard<br><small>${this.formatInterval(hardResult.interval)} (2)</small>`;
-    this.ratingGoodBtn.innerHTML = `Good<br><small>${this.formatInterval(goodResult.interval)} (3)</small>`;
-    this.ratingEasyBtn.innerHTML = `Easy<br><small>${this.formatInterval(easyResult.interval)} (4)</small>`;
+    const again = this.calculateFSRS(this.currentCard, 1);
+    const hard = this.calculateFSRS(this.currentCard, 2);
+    const good = this.calculateFSRS(this.currentCard, 3);
+    const easy = this.calculateFSRS(this.currentCard, 4);
+    const intervalLabel = result => result.dueMinutes ? "10 min" : this.formatInterval(result.interval);
+    this.ratingAgainBtn.innerHTML = "Again<br><small>" + intervalLabel(again) + " (1)</small>";
+    this.ratingHardBtn.innerHTML = "Hard<br><small>" + intervalLabel(hard) + " (2)</small>";
+    this.ratingGoodBtn.innerHTML = "Good<br><small>" + intervalLabel(good) + " (3)</small>";
+    this.ratingEasyBtn.innerHTML = "Easy<br><small>" + intervalLabel(easy) + " (4)</small>";
   }
 
   async rateCard(rating) {
     if (!this.currentCard) return;
-    
-    // Map our 4 buttons to SM-2 quality scores (0-5)
-    const qualityMap = {
-      1: 0, // Again = Complete failure
-      2: 2, // Hard = Incorrect but remembered
-      3: 3, // Good = Correct with difficulty
-      4: 5  // Easy = Perfect recall
-    };
-    
-    const quality = qualityMap[rating];
-    const sm2Result = this.calculateSM2(this.currentCard, quality);
-    
-    // Calculate next due date
-    const nextDueDate = new Date();
-    nextDueDate.setHours(0, 0, 0, 0); // Set to midnight today
-    
-    // Add interval days - if interval is 0, keep it today for same-session review
-    if (sm2Result.interval > 0) {
-      nextDueDate.setDate(nextDueDate.getDate() + sm2Result.interval);
-    }
-    
-    // Determine status
-    let status;
-    if (sm2Result.repetitions === 0) {
-      status = 'learning'; // New cards or lapsed cards
+    const normalizedRating = Math.min(4, Math.max(1, Math.round(Number(rating) || 1)));
+    const reviewedAt = new Date();
+    const result = this.calculateFSRS(this.currentCard, normalizedRating, reviewedAt);
+    const dueDate = new Date(reviewedAt.getTime());
+    if (result.dueMinutes) {
+      dueDate.setTime(reviewedAt.getTime() + result.dueMinutes * 60000);
     } else {
-      status = 'review'; // Graduated cards (rep >= 1)
+      dueDate.setHours(0, 0, 0, 0);
+      dueDate.setDate(dueDate.getDate() + result.interval);
     }
-    
-    // Update card in database
     const updatedCard = {
       ...this.currentCard,
-      repetitions: sm2Result.repetitions,
-      interval: sm2Result.interval,
-      easeFactor: sm2Result.easeFactor,
-      dueDate: nextDueDate.toISOString(),
-      lastReviewed: new Date().toISOString(),
-      status: status
+      repetitions: result.repetitions,
+      interval: result.interval,
+      easeFactor: result.easeFactor,
+      dueDate: dueDate.toISOString(),
+      lastReviewed: reviewedAt.toISOString(),
+      status: result.fsrs.state,
+      fsrs: result.fsrs
     };
-    
+
     await this.db.set(this.LEITNER_STORE, updatedCard);
-    
-    // Update cache for this word
-    await this.refreshLeitnerDueCacheForWord(this.currentCard.word, this.currentLeitnerScope);
-    
-    // If interval is 0 (Again button), re-add card to queue for same-session review
-    if (sm2Result.interval === 0) {
-      // Add to end of queue after 3-5 random cards (if available)
-      const insertPosition = Math.min(
-        this.leitnerQueue.length,
-        Math.floor(Math.random() * 3) + 3
-      );
+    await this.refreshLeitnerDueCacheForWord(updatedCard.word, this.currentLeitnerScope);
+    if (result.interval === 0) {
+      const insertPosition = Math.min(this.leitnerQueue.length, Math.floor(Math.random() * 3) + 3);
       this.leitnerQueue.splice(insertPosition, 0, updatedCard);
     }
-    
     this.showNextCard();
   }
-  
+
   // --- Import/Export ---
   showImportTextModal() { this.importTextModal.classList.remove("hidden"); }
   hideImportTextModal() { this.importTextModal.classList.add("hidden"); }
