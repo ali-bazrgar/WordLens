@@ -4,7 +4,7 @@
 
   const DEFAULTS = Object.freeze({
     apiMode: 'proxy',
-    llmBase: 'http://127.0.0.1:1234',
+    llmBase: 'http://127.0.0.1:8080',
     llmModel: 'Hy-MT2-1.8B-2Bit',
     llmApiKey: '',
     ttsBase: 'http://127.0.0.1:4321',
