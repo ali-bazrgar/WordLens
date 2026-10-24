@@ -1192,7 +1192,7 @@
             'REFRESH REQUEST: Reassess the headword independently. Accuracy matters more than novelty; do not manufacture a different gloss merely to avoid the previous result.',
             'Previous cached result for comparison only; it is not authoritative and must not be copied if it does not fit this headword: ' + JSON.stringify(previousCachedResult || null)
           ] : [])
-        ].join('\\n');
+        ].join('\n');
 
         const jsonOptions = {
           temperature: forceRefresh ? 0.7 : 0,
@@ -1222,7 +1222,7 @@
             'Required keys: meanings (array of objects with text and type), synonyms (array), antonyms (array). Return JSON only.',
             'TARGET WORD: ' + wordJson,
             'INVALID OUTPUT TO REPAIR: ' + String(raw).slice(0, 1800)
-          ].join('\\n');
+          ].join('\n');
           const repair = await localCompletion([{ role: 'user', content: repairPrompt }], {
             temperature: 0,
             max_tokens: 320,
@@ -1253,7 +1253,7 @@
             'Meaning entries must have concise Persian text and a correct Persian part-of-speech type. Synonyms and antonyms must be English-only.',
             'TARGET WORD: ' + wordJson,
             'PREVIOUS RESULT FOR COMPARISON ONLY: ' + JSON.stringify(previousCachedResult)
-          ].join('\\n');
+          ].join('\n');
           let alternativeRaw = '';
           try {
             alternativeRaw = await localCompletion([{ role: 'user', content: alternativePrompt }], {
