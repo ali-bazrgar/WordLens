@@ -1101,11 +1101,17 @@ class AIChatApp {
     const stability = Number.isFinite(card.stability) && card.stability > 0 ? card.stability : null;
     const difficulty = Number.isFinite(card.difficulty) ? Math.min(10, Math.max(1, card.difficulty)) : null;
     const lapses = Number.isFinite(card.lapses) ? Math.max(0, Math.floor(card.lapses)) : 0;
-    const status = typeof card.status === 'string' ? card.status : (repetitions === 0 ? 'new' : 'review');
+    const allowedStatuses = new Set(['new', 'learning', 'review', 'relearning']);
+    const status = allowedStatuses.has(card.status)
+      ? card.status
+      : (repetitions === 0 ? 'new' : 'review');
+    const learningStep = ['learning', 'relearning'].includes(status)
+      ? (Number.isInteger(card.learningStep) && card.learningStep >= 0 ? card.learningStep : 0)
+      : null;
     const fixedCard = {
       ...card, id: newId, word: normalizedWord, scopeType, scopeId, scopeKey,
       createdAt, dueDate, repetitions, interval, easeFactor, lastReviewed,
-      fsrsVersion, stability, difficulty, lapses, status
+      fsrsVersion, stability, difficulty, lapses, status, learningStep
     };
     const needsWrite =
       fixedCard.id !== card.id ||
@@ -1121,7 +1127,8 @@ class AIChatApp {
       fixedCard.stability !== card.stability ||
       fixedCard.difficulty !== card.difficulty ||
       fixedCard.lapses !== card.lapses ||
-      fixedCard.status !== card.status;
+      fixedCard.status !== card.status ||
+      fixedCard.learningStep !== (Number.isInteger(card.learningStep) ? card.learningStep : null);
 
     return { fixedCard, oldId: card.id, newId, needsWrite };
   }
@@ -1135,10 +1142,12 @@ class AIChatApp {
     const existingLastTs = existingLast && !Number.isNaN(existingLast.getTime()) ? existingLast.getTime() : -1;
     const incomingLastTs = incomingLast && !Number.isNaN(incomingLast.getTime()) ? incomingLast.getTime() : -1;
 
+    // A duplicate's latest review is the authoritative schedule. Choosing the
+    // highest repetition count first can resurrect an older state/due time.
     const winner =
-      incomingRep > existingRep ? incomingCard :
-      existingRep > incomingRep ? existingCard :
-      incomingLastTs > existingLastTs ? incomingCard : existingCard;
+      incomingLastTs > existingLastTs ? incomingCard :
+      existingLastTs > incomingLastTs ? existingCard :
+      incomingRep >= existingRep ? incomingCard : existingCard;
 
     const createdAt = this.coerceIsoDate(
       (existingCard?.createdAt && incomingCard?.createdAt)
@@ -1147,11 +1156,9 @@ class AIChatApp {
       null
     );
 
-    const dueA = existingCard?.dueDate ? new Date(existingCard.dueDate) : null;
-    const dueB = incomingCard?.dueDate ? new Date(incomingCard.dueDate) : null;
-    const dueATs = dueA && !Number.isNaN(dueA.getTime()) ? dueA.getTime() : Number.POSITIVE_INFINITY;
-    const dueBTs = dueB && !Number.isNaN(dueB.getTime()) ? dueB.getTime() : Number.POSITIVE_INFINITY;
-    const dueDate = this.coerceIsoDate(dueATs <= dueBTs ? existingCard?.dueDate : incomingCard?.dueDate, createdAt);
+    // Keep dueDate paired with the winning memory state (stability, difficulty,
+    // status and learningStep), rather than taking the older of two due dates.
+    const dueDate = this.coerceIsoDate(winner?.dueDate, createdAt);
 
     const todayMidnight = this.getMidnightLocal(new Date());
     const dueMidnight = this.getMidnightLocal(dueDate);
@@ -1179,7 +1186,12 @@ class AIChatApp {
       stability: Number.isFinite(winner?.stability) && winner.stability > 0 ? winner.stability : (Number.isFinite(existingCard?.stability) ? existingCard.stability : (incomingCard?.stability ?? null)),
       difficulty: Number.isFinite(winner?.difficulty) ? winner.difficulty : (Number.isFinite(existingCard?.difficulty) ? existingCard.difficulty : (incomingCard?.difficulty ?? null)),
       lapses: Math.max(Number(existingCard?.lapses) || 0, Number(incomingCard?.lapses) || 0),
-      lastReviewed
+      lastReviewed,
+      status: ['new', 'learning', 'review', 'relearning'].includes(winner?.status)
+        ? winner.status : (Math.max(existingRep, incomingRep) === 0 ? 'new' : 'review'),
+      learningStep: ['learning', 'relearning'].includes(winner?.status)
+        ? (Number.isInteger(winner?.learningStep) && winner.learningStep >= 0 ? winner.learningStep : 0)
+        : null
     };
   }
 
@@ -4036,9 +4048,15 @@ Be thorough and comprehensive.`;
   
   showNextCard() {
     if (this.leitnerQueue.length === 0) {
+      this.currentCard = null;
       this.showFinishedScreen();
       return;
     }
+
+    // A learning-step timer can make a card due after the session showed its
+    // finished screen. Restore the review UI before displaying that returned card.
+    this.leitnerFinishedScreen.classList.add('hidden');
+    this.leitnerCardContainer.classList.remove('hidden');
     this.currentCard = this.leitnerQueue.shift();
     
     // Update remaining count in stats
@@ -4287,42 +4305,101 @@ Be thorough and comprehensive.`;
     });
   }
   async rateCard(rating) {
-    if (!this.currentCard || ![1, 2, 3, 4].includes(rating)) return;
-    const reviewedAt = new Date(), cardAtRatingTime = this.currentCard;
-    const result = this.calculateFSRSSchedule(cardAtRatingTime, rating, reviewedAt);
-    const previousReviews = Number.isFinite(cardAtRatingTime.repetitions) ? cardAtRatingTime.repetitions : 0;
-    const previousLapses = Number.isFinite(cardAtRatingTime.lapses) ? cardAtRatingTime.lapses : 0;
-    const oldState = ['new', 'learning', 'relearning'].includes(cardAtRatingTime.status)
-      ? cardAtRatingTime.status : (previousReviews === 0 ? 'new' : 'review');
-    const nextDueDate = new Date(reviewedAt.getTime() + result.intervalMs);
-    const updatedCard = {
-      ...cardAtRatingTime,
-      repetitions: previousReviews + 1,
-      interval: result.interval,
-      easeFactor: cardAtRatingTime.easeFactor || 2.5,
-      dueDate: nextDueDate.toISOString(),
-      lastReviewed: reviewedAt.toISOString(),
-      fsrsVersion: 6,
-      stability: result.stability,
-      difficulty: result.difficulty,
-      lapses: previousLapses + (rating === 1 && oldState === 'review' ? 1 : 0),
-      status: result.nextStatus,
-      learningStep: result.nextLearningStep
-    };
-    await this.db.set(this.LEITNER_STORE, updatedCard);
-    await this.refreshLeitnerDueCacheForWord(cardAtRatingTime.word, this.currentLeitnerScope);
-    if (result.scheduleKind === 'learning' || result.scheduleKind === 'relearning') {
-      const sessionId = this.leitnerReviewSessionId;
-      let timer;
-      timer = setTimeout(() => {
-        this.leitnerLearningTimers?.delete(timer);
-        if (sessionId !== this.leitnerReviewSessionId || this.leitnerModal.classList.contains('hidden')) return;
-        if (!this.leitnerQueue.some(card => card.id === updatedCard.id)) this.leitnerQueue.push(updatedCard);
-        if (!this.leitnerFinishedScreen.classList.contains('hidden')) this.showNextCard();
-      }, Math.max(1, result.intervalMs));
-      this.leitnerLearningTimers.add(timer);
+    if (!this.currentCard || ![1, 2, 3, 4].includes(rating) || this.isSavingCardRating) return;
+
+    // A fast double-click/key repeat must not save two schedules from the same
+    // stale card state. Keep the controls locked until IndexedDB confirms the save.
+    this.isSavingCardRating = true;
+    const ratingButtons = [
+      this.ratingAgainBtn, this.ratingHardBtn, this.ratingGoodBtn, this.ratingEasyBtn
+    ].filter(Boolean);
+    ratingButtons.forEach(button => { button.disabled = true; });
+    const cardAtRatingTime = this.currentCard;
+
+    try {
+      const reviewedAt = new Date();
+      const result = this.calculateFSRSSchedule(cardAtRatingTime, rating, reviewedAt);
+      const previousReviews = Number.isFinite(cardAtRatingTime.repetitions) ? cardAtRatingTime.repetitions : 0;
+      const previousLapses = Number.isFinite(cardAtRatingTime.lapses) ? cardAtRatingTime.lapses : 0;
+      const oldState = ['new', 'learning', 'relearning'].includes(cardAtRatingTime.status)
+        ? cardAtRatingTime.status : (previousReviews === 0 ? 'new' : 'review');
+      const nextDueDate = new Date(reviewedAt.getTime() + result.intervalMs);
+      const updatedCard = {
+        ...cardAtRatingTime,
+        repetitions: previousReviews + 1,
+        interval: result.interval,
+        easeFactor: cardAtRatingTime.easeFactor || 2.5,
+        dueDate: nextDueDate.toISOString(),
+        lastReviewed: reviewedAt.toISOString(),
+        fsrsVersion: 6,
+        stability: result.stability,
+        difficulty: result.difficulty,
+        lapses: previousLapses + (rating === 1 && oldState === 'review' ? 1 : 0),
+        status: result.nextStatus,
+        learningStep: result.nextLearningStep
+      };
+
+      await this.db.set(this.LEITNER_STORE, updatedCard);
+      // Read back the persisted record so timers/queues never reuse an old object.
+      const savedCard = await this.db.get(this.LEITNER_STORE, updatedCard.id).catch(() => null);
+      const scheduledCard = savedCard || updatedCard;
+      await this.refreshLeitnerDueCacheForWord(scheduledCard.word, this.currentLeitnerScope);
+
+      if (result.scheduleKind === 'learning' || result.scheduleKind === 'relearning') {
+        const sessionId = this.leitnerReviewSessionId;
+        let timer;
+        const enqueueWhenDue = async () => {
+          this.leitnerLearningTimers?.delete(timer);
+          if (sessionId !== this.leitnerReviewSessionId || this.leitnerModal.classList.contains('hidden')) return;
+
+          let latestCard;
+          try {
+            latestCard = await this.db.get(this.LEITNER_STORE, scheduledCard.id);
+          } catch (error) {
+            console.warn('[Leitner] Could not reload a due learning card:', error);
+            return;
+          }
+          if (!latestCard) return;
+
+          const dueMs = new Date(this.coerceIsoDate(latestCard.dueDate, latestCard.createdAt)).getTime();
+          const remainingMs = dueMs - Date.now();
+          // If another write moved the due date, follow the saved timestamp rather
+          // than enqueueing the stale schedule captured by this timer.
+          if (remainingMs > 5) {
+            timer = setTimeout(enqueueWhenDue, remainingMs + 5);
+            this.leitnerLearningTimers.add(timer);
+            return;
+          }
+
+          const alreadyCurrent = this.currentCard?.id === latestCard.id;
+          const alreadyQueued = this.leitnerQueue.some(card => card.id === latestCard.id);
+          if (!alreadyCurrent && !alreadyQueued) this.leitnerQueue.push(latestCard);
+
+          if (!alreadyCurrent && !alreadyQueued) {
+            const newCount = this.leitnerQueue.filter(card => (card.repetitions || 0) === 0).length;
+            const reviewCount = this.leitnerQueue.filter(card => (card.repetitions || 0) > 0).length;
+            this.leitnerStatsNew.textContent = `New: ${newCount}`;
+            this.leitnerStatsDue.textContent = `Review: ${reviewCount} | Remaining: ${this.leitnerQueue.length}`;
+          }
+
+          if (!this.leitnerFinishedScreen.classList.contains('hidden') && this.leitnerQueue.length > 0) {
+            this.showNextCard();
+          }
+        };
+
+        const dueMs = new Date(this.coerceIsoDate(scheduledCard.dueDate, scheduledCard.createdAt)).getTime();
+        timer = setTimeout(enqueueWhenDue, Math.max(1, dueMs - Date.now() + 5));
+        this.leitnerLearningTimers.add(timer);
+      }
+
+      this.showNextCard();
+    } catch (error) {
+      console.error('[Leitner] Failed to save card review:', error);
+      this.showToast('Could not save the flashcard schedule. Please try rating the card again.', 'error');
+    } finally {
+      this.isSavingCardRating = false;
+      ratingButtons.forEach(button => { button.disabled = false; });
     }
-    this.showNextCard();
   }
 
   // --- Import/Export ---
