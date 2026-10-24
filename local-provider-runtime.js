@@ -853,8 +853,8 @@
       const systemPrompt = typeof this.getEffectiveSystemInstructions === 'function'
         ? this.getEffectiveSystemInstructions()
         : [
-            'You are WordLens, a helpful assistant. Reply in the user’s language unless asked otherwise.',
-            'Use valid CommonMark Markdown. Structure multi-part answers with headings, lists or numbered steps as appropriate; use fenced code blocks for code.'
+            'Answer the current request directly. Do not identify yourself as WordLens or introduce yourself unless explicitly asked.',
+            'Follow the user’s saved Custom Instructions when available. Use valid CommonMark Markdown for structured answers and never duplicate heading markers.'
           ].join('\n');
       const messages = [
         { role: 'system', content: systemPrompt },
@@ -1621,6 +1621,13 @@
         const chat=this.chats.find(item=>item.id===this.currentChatId);
         const assistantMessage=chat?.messages?.[chat.messages.length-1];
         const assistantMessageId=assistantMessage?.role==='ai'?assistantMessage.id:null;
+        const assistantMessageElement=assistantMessageId?document.getElementById(assistantMessageId):null;
+        const visibleMessage=assistantMessageElement?.querySelector('.message');
+        const speechText=String(visibleMessage
+          ? (typeof visibleMessage.innerText==='string'?visibleMessage.innerText:visibleMessage.textContent)
+          : answer).replace(/\r\n?/g,'\n').replace(/\u00a0/g,' ')
+          .split('\n').map(line=>line.replace(/[ \t]+$/g,'')).join('\n')
+          .replace(/\n{3,}/g,'\n\n').trim();
         if(chat&&chat.messages.length===2&&!String(chat.title||'').includes('(Imported)')){
           chat.title=transcript.substring(0,30)+(transcript.length>30?'...':'');
           this.saveChats();
@@ -1631,7 +1638,7 @@
         if(session.active&&this.realtimeSession===session&&answer.trim()){
           session.state='synthesizing';
           realtimeSetStatus(this,'Preparing speech… you can interrupt.','processing');
-          const audioBlob=await localTTS(answer,{signal:controller.signal});
+          const audioBlob=await localTTS(speechText,{signal:controller.signal});
           if(!audioBlob||!audioBlob.size)throw new Error('TTS returned an empty audio file.');
 
           // Store the exact live-generated audio under the cache keys used by
@@ -1640,8 +1647,8 @@
           const model=getCfg('ttsModel')||DEFAULTS.ttsModel;
           const voice=getCfg('ttsVoice')||DEFAULTS.ttsVoice;
           const cacheEntries=[
-            {text:'full_'+answer,value:audioBlob},
-            {text:'full_local_pocket_tts_'+model+'_'+voice+'_'+String(answer??''),value:audioBlob}
+            {text:'full_'+speechText,value:audioBlob},
+            {text:'full_local_pocket_tts_'+model+'_'+voice+'_'+String(speechText??''),value:audioBlob}
           ];
           await Promise.all(cacheEntries.map(entry=>this.db.set('audio_cache',entry).catch(error=>{
             console.debug('Live TTS audio cache write failed:',error);
