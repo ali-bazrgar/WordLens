@@ -8,9 +8,9 @@ from urllib.parse import urlparse
 
 PORT = int(os.environ.get("WORDLENS_PORT", "8000"))
 LLM_BASE = os.environ.get("WORDLENS_LLM_BASE", "http://127.0.0.1:8080").rstrip("/")
-TTS_BASE = os.environ.get("WORDLENS_TTS_BASE", "http://127.0.0.1:4321").rstrip("/")
-# Leave empty until the local OpenAI-compatible STT endpoint is known.
-STT_BASE = os.environ.get("WORDLENS_STT_BASE", "").rstrip("/")
+TTS_BASE = os.environ.get("WORDLENS_TTS_BASE", "http://127.0.0.1:8082").rstrip("/")
+# Local whisper.cpp OpenAI-compatible STT endpoint.
+STT_BASE = os.environ.get("WORDLENS_STT_BASE", "http://127.0.0.1:8767").rstrip("/")
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".wordlens")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "local-provider-config.json")
 
@@ -35,8 +35,15 @@ def _load_saved_config():
         with open(CONFIG_FILE, "r", encoding="utf-8") as config_file:
             config = json.load(config_file)
         LLM_BASE = _validate_upstream_url(config.get("llm_base", LLM_BASE))
-        TTS_BASE = _validate_upstream_url(config.get("tts_base", TTS_BASE))
-        STT_BASE = _validate_upstream_url(config.get("stt_base", STT_BASE), allow_empty=True)
+        saved_tts = str(config.get("tts_base", TTS_BASE) or "").rstrip("/")
+        # Migrate the previous built-in default so old local settings cannot
+        # silently keep routing Pocket TTS requests to port 4321.
+        if saved_tts in ("http://127.0.0.1:4321", "http://127.0.0.1:4321/v1"):
+            saved_tts = TTS_BASE
+        TTS_BASE = _validate_upstream_url(saved_tts or TTS_BASE)
+        saved_stt = str(config.get("stt_base", STT_BASE) or "").strip().rstrip("/")
+        # An empty STT address was the previous default; use the configured local Whisper endpoint.
+        STT_BASE = _validate_upstream_url(saved_stt or STT_BASE, allow_empty=True)
     except FileNotFoundError:
         pass
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -232,6 +239,11 @@ class WordLensHandler(SimpleHTTPRequestHandler):
 
         if clean_path == "/local-api/chat/completions":
             self._proxy(openai_endpoint(LLM_BASE, "/chat/completions"), body)
+            return
+
+        if clean_path == "/local-api/tts":
+            # Native Kyutai Pocket-TTS accepts multipart/form-data at /tts.
+            self._proxy(f"{service_root(TTS_BASE)}/tts", body)
             return
 
         if clean_path == "/local-api/audio/speech":
