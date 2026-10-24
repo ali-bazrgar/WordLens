@@ -1,12 +1,10 @@
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 import http.client
 import queue
 import select
 import socket
 import threading
-from urllib.parse import urlparse
 import json
 import os
 import ipaddress
