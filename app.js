@@ -3180,139 +3180,183 @@ Be thorough and comprehensive.`;
   }
 
   async showWordMeaning(word) {
-    if (!word.trim()) return;
+    word = String(word ?? "").trim();
+    if (!word) return;
 
-    const newPopup = this.wordMeaningPopup.cloneNode(true);
-    newPopup.id = `word-meaning-popup-${Date.now()}`;
-    newPopup.classList.add('hidden'); // Start hidden
-    document.body.appendChild(newPopup);
+    const popup = this.wordMeaningPopup.cloneNode(true);
+    popup.id = "word-meaning-popup-" + Date.now();
+    popup.classList.add("hidden");
+    document.body.appendChild(popup);
 
-    const titleEl = newPopup.querySelector("#word-meaning-title");
-    const meaningsListEl = newPopup.querySelector("#meanings-list");
-    const synonymsListEl = newPopup.querySelector("#synonyms-list");
-    const antonymsListEl = newPopup.querySelector("#antonyms-list");
-    const closeBtn = newPopup.querySelector("#close-word-meaning");
-    const playAudioBtn = newPopup.querySelector("#play-word-audio-btn");
-    const reviewWordBtn = newPopup.querySelector("#review-word-btn");
-    const addToLeitnerBtn = newPopup.querySelector("#add-to-leitner-btn");
-    
+    const titleEl = popup.querySelector("#word-meaning-title");
+    const meaningsEl = popup.querySelector("#meanings-list");
+    const synonymsEl = popup.querySelector("#synonyms-list");
+    const antonymsEl = popup.querySelector("#antonyms-list");
+    const closeBtn = popup.querySelector("#close-word-meaning");
+    const audioBtn = popup.querySelector("#play-word-audio-btn");
+    const reviewBtn = popup.querySelector("#review-word-btn");
+    const addBtn = popup.querySelector("#add-to-leitner-btn");
+    const refreshBtn = popup.querySelector("#refresh-word-meaning-btn");
+    const wordKey = word.toLowerCase().trim();
+    let activeRequest = 0;
+
     titleEl.textContent = word;
-    meaningsListEl.innerHTML = '<div class="meaning-item">Loading...</div>';
-    
-    // Check if word has a due/overdue card in current scope or global
+    meaningsEl.textContent = "Loading meaning…";
+    this.showPopup(popup);
+
     const normalizedWord = this.normalizeWord(word);
     const scope = this.getActiveScope();
     const scopeKey = this.getScopeKey(scope);
-    const cardId = `${scopeKey}:${normalizedWord}`;
-    const globalCardId = `global:all:${normalizedWord}`;
-    
-    // Check both scope-specific and global cards
-    const [card, globalCard] = await Promise.all([
-      this.db.get(this.LEITNER_STORE, cardId),
-      scopeKey !== 'global:all' ? this.db.get(this.LEITNER_STORE, globalCardId) : Promise.resolve(null)
-    ]);
-    
-    // Use scope-specific card if exists, otherwise use global
-    const cardToReview = card || globalCard;
-    
-    if (cardToReview) {
-      const dueState = this.evaluateCardDueState(cardToReview);
-      if (dueState.state === 'due' || dueState.state === 'overdue') {
-        reviewWordBtn.classList.remove('hidden');
-        reviewWordBtn.addEventListener('click', () => {
-          this.hidePopup(newPopup);
-          newPopup.remove();
-          // Start a quick review session for this specific card
-          this.startQuickReview(cardToReview);
-        });
-      }
-    }
-    
-    this.showPopup(newPopup);
-
-    // Close popup when clicking outside the content area
-    newPopup.addEventListener('click', (e) => {
-        if (e.target === newPopup) {
-            this.hidePopup(newPopup);
-            newPopup.remove();
+    const cardId = scopeKey + ":" + normalizedWord;
+    const globalCardId = "global:all:" + normalizedWord;
+    try {
+      const [card, globalCard] = await Promise.all([
+        this.db.get(this.LEITNER_STORE, cardId),
+        scopeKey !== "global:all" ? this.db.get(this.LEITNER_STORE, globalCardId) : Promise.resolve(null)
+      ]);
+      const cardToReview = card || globalCard;
+      if (cardToReview && reviewBtn) {
+        const dueState = this.evaluateCardDueState(cardToReview);
+        if (dueState.state === "due" || dueState.state === "overdue") {
+          reviewBtn.classList.remove("hidden");
+          reviewBtn.addEventListener("click", () => {
+            this.hidePopup(popup);
+            popup.remove();
+            this.startQuickReview(cardToReview);
+          });
         }
-    });
-
-    // Bind events for the new popup
-    closeBtn.addEventListener('click', () => {
-        this.hidePopup(newPopup);
-        newPopup.remove();
-    });
-    
-    playAudioBtn.addEventListener('click', () => this.playTextToSpeech(word, playAudioBtn, null, null));
-    
-    addToLeitnerBtn.addEventListener('click', () => this.addCurrentWordToLeitner(word));
-
-    const playWordItemAudio = (event) => {
-        const button = event.target.closest('.btn-audio-word-item');
-        if (button) {
-            event.stopPropagation();
-            const text = button.dataset.text;
-            if (text) {
-                this.playTextToSpeech(text, button, null, null);
-            }
-        }
-    };
-    synonymsListEl.addEventListener('click', playWordItemAudio);
-    antonymsListEl.addEventListener('click', playWordItemAudio);
-    
-    const handleWordClick = (event) => {
-      if (event.target.classList.contains('clickable-word')) {
-          // Clean the word before showing meaning
-          const rawWord = event.target.textContent.trim();
-          const cleanWord = rawWord.replace(/^[^\w]+|[^\w]+$/g, '').replace(/[^\w\s'-]/g, '').toLowerCase();
-          if (cleanWord) {
-              this.showWordMeaning(cleanWord);
-          }
       }
-    };
-    synonymsListEl.addEventListener('click', handleWordClick);
-    antonymsListEl.addEventListener('click', handleWordClick);
-
-    // Fetch and render data
-    const meaningData = await this.getWordMeaning(word);
-    meaningsListEl.innerHTML = '';
-    if (meaningData.meanings && meaningData.meanings.length > 0 && meaningData.meanings[0].type !== "Error") {
-      meaningData.meanings.forEach(meaning => {
-        const div = document.createElement("div");
-        div.className = "meaning-item";
-        div.innerHTML = `<div class="meaning-text">${meaning.text}</div><span class="meaning-type">${meaning.type}</span>`;
-        meaningsListEl.appendChild(div);
-      });
-    } else {
-      const errorMessage = meaningData.meanings[0]?.text || "Meaning not found";
-      meaningsListEl.innerHTML = `<div class="meaning-item">${errorMessage}</div>`;
+    } catch (error) {
+      console.warn("Could not look up the existing flashcard:", error);
     }
-    const renderWordList = (listElement, wordList, itemClass) => {
-      listElement.innerHTML = '';
-      if (wordList && wordList.length > 0) {
-        wordList.forEach(itemWord => {
-          const container = document.createElement("div");
-          container.className = `${itemClass}-container`;
-          const span = document.createElement("span");
-          span.className = `${itemClass} clickable-word`;
-          span.textContent = itemWord;
-          const button = document.createElement("button");
-          button.className = "btn-icon btn-audio-word-item";
-          button.dataset.text = itemWord;
-          button.title = `Play ${itemWord}`;
-          button.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon></svg>`;
-          container.appendChild(span);
-          container.appendChild(button);
-          listElement.appendChild(container);
+
+    const closePopup = () => {
+      this.hidePopup(popup);
+      popup.remove();
+    };
+    popup.addEventListener("click", event => {
+      if (event.target === popup) closePopup();
+    });
+    closeBtn?.addEventListener("click", closePopup);
+    audioBtn?.addEventListener("click", () => this.playTextToSpeech(word, audioBtn, null, null));
+    addBtn?.addEventListener("click", () => this.addCurrentWordToLeitner(word));
+
+    const handleAudioClick = event => {
+      const button = event.target.closest(".btn-audio-word-item");
+      if (!button) return;
+      event.stopPropagation();
+      if (button.dataset.text) this.playTextToSpeech(button.dataset.text, button, null, null);
+    };
+    synonymsEl.addEventListener("click", handleAudioClick);
+    antonymsEl.addEventListener("click", handleAudioClick);
+
+    const handleWordClick = event => {
+      const wordEl = event.target.closest(".clickable-word");
+      if (!wordEl) return;
+      const clean = wordEl.textContent.trim().replace(/^[^\w]+|[^\w]+$/g, "").replace(/[^\w\s'-]/g, "").toLowerCase();
+      if (clean) this.showWordMeaning(clean);
+    };
+    synonymsEl.addEventListener("click", handleWordClick);
+    antonymsEl.addEventListener("click", handleWordClick);
+
+    const renderMeaningData = data => {
+      meaningsEl.replaceChildren();
+      const meanings = Array.isArray(data?.meanings) ? data.meanings : [];
+      const isError = !meanings.length || /^(error|خطا)$/i.test(String(meanings[0]?.type || ""));
+      if (!isError) {
+        meanings.forEach(item => {
+          const row = document.createElement("div");
+          row.className = "meaning-item";
+          const text = document.createElement("div");
+          text.className = "meaning-text";
+          text.textContent = String(item?.text || "");
+          const type = document.createElement("span");
+          type.className = "meaning-type";
+          type.textContent = String(item?.type || "");
+          row.append(text, type);
+          meaningsEl.appendChild(row);
         });
       } else {
-        listElement.innerHTML = `<span class="${itemClass}-item">${itemClass === 'synonym-item' ? 'No synonyms found' : 'No antonyms found'}</span>`;
+        const message = document.createElement("div");
+        message.className = "meaning-item";
+        message.textContent = String(meanings[0]?.text || "Meaning not found.");
+        meaningsEl.appendChild(message);
+      }
+
+      const renderWordList = (element, words, itemClass, emptyText) => {
+        element.replaceChildren();
+        const items = Array.isArray(words) ? words : [];
+        if (!items.length) {
+          const empty = document.createElement("span");
+          empty.className = itemClass + "-item";
+          empty.textContent = emptyText;
+          element.appendChild(empty);
+          return;
+        }
+        items.forEach(value => {
+          const itemWord = String(value ?? "").trim();
+          if (!itemWord) return;
+          const container = document.createElement("div");
+          container.className = itemClass + "-container";
+          const text = document.createElement("span");
+          text.className = itemClass + " clickable-word";
+          text.textContent = itemWord;
+          const play = document.createElement("button");
+          play.type = "button";
+          play.className = "btn-icon btn-audio-word-item";
+          play.dataset.text = itemWord;
+          play.title = "Play " + itemWord;
+          play.setAttribute("aria-label", "Play " + itemWord);
+          play.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon></svg>';
+          container.append(text, play);
+          element.appendChild(container);
+        });
+      };
+      renderWordList(synonymsEl, data?.synonyms, "synonym-item", "No synonyms found");
+      renderWordList(antonymsEl, data?.antonyms, "antonym-item", "No antonyms found");
+    };
+
+    const fetchAndRender = async forceRefresh => {
+      const requestId = ++activeRequest;
+      if (forceRefresh) {
+        if (refreshBtn) {
+          refreshBtn.disabled = true;
+          refreshBtn.classList.add("is-loading");
+          refreshBtn.setAttribute("aria-busy", "true");
+          refreshBtn.innerHTML = '<span>Regenerating…</span>';
+        }
+        meaningsEl.textContent = "Generating a fresh meaning…";
+        synonymsEl.replaceChildren();
+        antonymsEl.replaceChildren();
+      }
+      try {
+        if (forceRefresh) {
+          // Delete the old entry first, then bypass every provider cache as a second guard.
+          await this.db.delete("word_meanings", wordKey);
+        }
+        const result = await this.getWordMeaning(word, { forceRefresh: !!forceRefresh });
+        if (requestId === activeRequest && popup.isConnected) renderMeaningData(result);
+      } catch (error) {
+        console.error("Word meaning fetch failed:", error);
+        if (requestId === activeRequest && popup.isConnected) {
+          meaningsEl.textContent = (forceRefresh ? "Could not regenerate the meaning: " : "Could not load the meaning: ") + (error?.message || String(error));
+          synonymsEl.replaceChildren();
+          antonymsEl.replaceChildren();
+        }
+      } finally {
+        if (requestId === activeRequest && refreshBtn && popup.isConnected) {
+          refreshBtn.disabled = false;
+          refreshBtn.classList.remove("is-loading");
+          refreshBtn.removeAttribute("aria-busy");
+          refreshBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"></path><path d="M20 12a8 8 0 1 1-2.34-5.66L20 9"></path></svg><span>Refresh meaning</span>';
+        }
       }
     };
-    renderWordList(synonymsListEl, meaningData.synonyms, "synonym-item");
-    renderWordList(antonymsListEl, meaningData.antonyms, "antonym-item");
+
+    refreshBtn?.addEventListener("click", () => fetchAndRender(true));
+    await fetchAndRender(false);
   }
+
 
   playLeitnerCardAudio() { if (this.currentCard) { this.playTextToSpeech(this.currentCard.word, this.leitnerPlayAudioBtn, null, null); } }
   playTranslationAudio() { const text = this.originalTextEl.textContent; if (text) { this.playTextToSpeech(text, this.playTranslationAudioBtn, null, null); } }
