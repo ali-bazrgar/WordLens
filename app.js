@@ -2606,7 +2606,13 @@ class AIChatApp {
         setTimeout(() => { if (progressBar) this.updateProgress(progressBar, 0) }, 500);
         this.currentUtterance = null;
       };
-      utterance.onerror = (e) => { console.error("Browser TTS Error:", e); this.showToast("Failed to generate speech.", "error"); };
+      utterance.onerror = (e) => {
+        console.error("Browser TTS Error:", e);
+        button.classList.remove("playing");
+        button.disabled = false;
+        if (this.currentUtterance === utterance) this.currentUtterance = null;
+        this.showToast("Browser speech could not play. Try the speaker button again or connect to generate cached audio.", "error");
+      };
       button.disabled = true; button.classList.add("playing"); speechSynthesis.speak(utterance);
     } catch (error) {
       console.error("Browser TTS Error:", error);
