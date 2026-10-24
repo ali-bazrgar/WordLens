@@ -3496,8 +3496,11 @@ Be thorough and comprehensive.`;
   playTranslationAudio() { const text = this.originalTextEl.textContent; if (text) { this.playTextToSpeech(text, this.playTranslationAudioBtn, null, null); } }
 
   async translateText(text) {
-    if (this.chatProvider === 'avalai' && this.AVALAI_API_KEY) return this.translateTextAvalai(text);
-    if (this.chatProvider === 'openrouter' && this.OPENROUTER_API_KEY) return this.translateTextOpenRouter(text);
+    // Follow the selected chat provider exactly. The local-provider runtime
+    // overrides the OpenRouter-named route with the configured local LLM, so
+    // it must not be skipped merely because no cloud API key is stored.
+    if (this.chatProvider === 'avalai') return this.translateTextAvalai(text);
+    if (this.chatProvider === 'openrouter') return this.translateTextOpenRouter(text);
     return this.translateTextGemini(text);
   }
 
@@ -3572,14 +3575,18 @@ Be thorough and comprehensive.`;
     clearTimeout(this.selectionTimeout);
     this.selectionTimeout = setTimeout(() => {
       const selection = window.getSelection();
-      const selectedText = selection.toString().trim();
-      if (selectedText.length > 0) {
+      const selectedText = selection?.toString().trim() || '';
+      if (selectedText && selection?.rangeCount) {
+        // Keep a durable copy: browsers (especially mobile Safari/Chrome) may
+        // collapse the selection when the floating Translate button is tapped.
+        this.selectedText = selectedText;
         const range = selection.getRangeAt(0);
         const rect = range.getBoundingClientRect();
         if (rect.width > 0 || rect.height > 0) this.showTranslateButton(rect);
-      } else {
-        this.hideTranslateButton();
       }
+      // An empty browser selection is not enough to discard the saved text:
+      // clicking the floating button itself can clear it. Outside clicks have
+      // their own handler that hides the button.
     }, 100);
   }
 
@@ -3597,20 +3604,26 @@ Be thorough and comprehensive.`;
 
   handleTranslateButtonClick() {
     const selection = window.getSelection();
-    const selectedText = selection.toString().trim();
-    if (selectedText) {
-      // Clean single words before showing meaning
-      if (!/\s/.test(selectedText)) {
-        const cleanWord = selectedText.replace(/^[^\w]+|[^\w]+$/g, '').replace(/[^\w\s'-]/g, '').toLowerCase();
-        if (cleanWord) {
-          this.showWordMeaning(cleanWord);
-        }
-      } else {
-        this.showTranslationPopup(selectedText);
-      }
+    // Prefer the live browser selection, but fall back to the cached selection
+    // because a pointer/touch on this button may collapse it before click fires.
+    const selectedText = (selection?.toString().trim() || String(this.selectedText || '')).trim();
+    if (!selectedText) {
+      this.hideTranslateButton();
+      return;
     }
+
+    this.selectedText = selectedText;
+    // Clean single words before showing meaning.
+    if (!/\s/.test(selectedText)) {
+      const cleanWord = selectedText.replace(/^[^\w]+|[^\w]+$/g, '').replace(/[^\w\s'-]/g, '').toLowerCase();
+      if (cleanWord) this.showWordMeaning(cleanWord);
+    } else {
+      this.showTranslationPopup(selectedText);
+    }
+
     this.hideTranslateButton();
-    selection.removeAllRanges();
+    try { selection?.removeAllRanges(); } catch (_) {}
+    this.selectedText = '';
   }
 
   async showTranslationPopup(text) {
@@ -4859,6 +4872,11 @@ class AdvancedTTSPlayer {
     // Store references to UI elements for cleanup
     this.simpleAudioBtn = null;
     this.advancedControlsElement = null;
+    // A live conversation can hand the already-generated Blob to this player,
+    // so playback and sentence highlighting use the exact same audio.
+    this.preGeneratedAudio = null;
+    this.realtimeSession = null;
+    this.resolvePlaybackCompletion = null;
   }
 
   // Split text into sentences
@@ -4928,10 +4946,14 @@ class AdvancedTTSPlayer {
     return words;
   }
 
-  async playMessage(text, messageId, controlsContainer) {
+  async playMessage(text, messageId, controlsContainer, options = {}) {
     this.messageId = messageId;
     this.controlsElement = controlsContainer;
     this.fullText = text;
+    this.preGeneratedAudio = options.audioBlob instanceof Blob && options.audioBlob.size > 0
+      ? options.audioBlob
+      : null;
+    this.realtimeSession = options.realtimeSession || null;
     this.sentences = this.splitIntoSentences(text);
     this.words = this.extractWords(text);
     this.currentSentenceIndex = 0;
@@ -5376,8 +5398,9 @@ class AdvancedTTSPlayer {
 
   async startPlayback() {
     try {
-      // Generate audio for the entire text (only once!)
-      const audioBlob = await this.generateFullAudio(this.fullText);
+      // Reuse an audio Blob created by live conversation when available.
+      // Otherwise use the standard TTS/cache path.
+      const audioBlob = this.preGeneratedAudio || await this.generateFullAudio(this.fullText);
       
       if (!audioBlob) {
         this.app.showToast('Failed to generate audio', 'error');
@@ -5388,10 +5411,26 @@ class AdvancedTTSPlayer {
       const audioUrl = URL.createObjectURL(audioBlob);
       this.audio = new Audio(audioUrl);
       this.audio.playbackRate = this.playbackRate;
-      
+
+      // During live conversation, expose this player to the interruption
+      // detector, so barge-in stops the very same audio that is highlighted.
+      const liveSession = this.realtimeSession;
+      if (liveSession) {
+        liveSession.audio = this.audio;
+        liveSession.audioStop = () => {
+          if (liveSession.audio !== this.audio) return;
+          try { this.audio.pause(); this.audio.currentTime = 0; } catch (_) {}
+          this.stop();
+        };
+      }
+      const liveCompletion = liveSession
+        ? new Promise(resolve => { this.resolvePlaybackCompletion = resolve; })
+        : null;
+
       // Set up event listeners
       this.audio.onended = () => {
         this.onPlaybackComplete();
+        this.detachRealtimeAudio();
       };
       
       this.audio.onerror = (e) => {
@@ -5407,15 +5446,32 @@ class AdvancedTTSPlayer {
       this.updatePlayPauseButton();
       
       await this.audio.play();
-      
+
       // Start sentence synchronization (more reliable than word-level)
       this.startSentenceSync();
+
+      // Keep the live turn's loading lock until speech really ends (or is
+      // interrupted), preserving the existing live barge-in state machine.
+      if (liveCompletion) await liveCompletion;
       
     } catch (error) {
       console.error('Error starting playback:', error);
       this.app.showToast('Failed to start playback', 'error');
       this.cleanup();
     }
+  }
+
+  finishPlaybackWait() {
+    const resolve = this.resolvePlaybackCompletion;
+    this.resolvePlaybackCompletion = null;
+    if (resolve) resolve();
+  }
+
+  detachRealtimeAudio() {
+    const session = this.realtimeSession;
+    if (!session) return;
+    if (session.audio === this.audio) session.audio = null;
+    if (!session.audio) session.audioStop = null;
   }
 
   async generateFullAudio(text) {
@@ -5704,6 +5760,8 @@ class AdvancedTTSPlayer {
     this.clearAllHighlights();
     this.updatePlayPauseButton();
     this.updateProgressDisplay();
+    this.detachRealtimeAudio();
+    this.finishPlaybackWait();
   }
 
   async previousSentence() {
@@ -5824,7 +5882,9 @@ class AdvancedTTSPlayer {
     this.isPaused = false;
     this.clearAllHighlights();
     this.updatePlayPauseButton();
-    
+    this.detachRealtimeAudio();
+    this.finishPlaybackWait();
+
     if (this.animationFrameId) {
       cancelAnimationFrame(this.animationFrameId);
     }
