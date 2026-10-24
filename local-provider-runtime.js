@@ -1156,14 +1156,27 @@
         try{return await originalMethod.call(this,message);}finally{if(matches)chat.messages.push(last);}
       };
     });
-    const originalTranscribeAudio=AIChatApp.prototype.transcribeAudio;
     AIChatApp.prototype.transcribeAudio=async function(audioBlob){
-      if(getCfg('sttProvider')==='avalai')return originalTranscribeAudio.call(this,audioBlob);
       const previousPlaceholder=this.messageInput?.placeholder||'Type a message...';
       if(this.messageInput){this.messageInput.placeholder='Transcribing audio…';this.messageInput.disabled=true;}
-      try{const transcript=await localSTT(audioBlob,this);if(this.messageInput){this.messageInput.value=transcript;this.adjustTextareaHeight();this.messageInput.focus();}}
-      catch(error){console.error('OpenAI-compatible STT error:',error);this.showToast('Transcription failed: '+error.message,'error');}
-      finally{if(this.messageInput){this.messageInput.placeholder=previousPlaceholder;this.messageInput.disabled=false;}}
+      try {
+        // Use the same bounded request/response handling for both local whisper.cpp
+        // and Avalai; the legacy app method has no network deadline and can hang.
+        const transcript=await localSTT(audioBlob,this);
+        if(this.messageInput){
+          this.messageInput.value=transcript;
+          this.adjustTextareaHeight();
+          this.messageInput.focus();
+        }
+      } catch(error) {
+        console.error('STT transcription error:',error);
+        this.showToast('Transcription failed: '+error.message,'error');
+      } finally {
+        if(this.messageInput){
+          this.messageInput.placeholder=previousPlaceholder;
+          this.messageInput.disabled=false;
+        }
+      }
     };
     const originalBindEvents=AIChatApp.prototype.bindEvents;
     AIChatApp.prototype.bindEvents=function(){originalBindEvents.call(this);window.WORDLENS_APP=this;this.realtimeBtn=document.getElementById('realtime-btn');this.realtimeStatus=document.getElementById('realtime-status');this.realtimeSession=null;this.realtimeStarting=false;
