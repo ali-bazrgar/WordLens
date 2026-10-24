@@ -4435,7 +4435,12 @@ Be thorough and comprehensive.`;
       } else if (grade === 3) {
         if (step + 1 >= learningSteps.length) graduate();
         else putOnStep(learningSteps, step + 1);
-      } else graduate();
+      } else {
+        graduate();
+        // Preserve the established one-day Easy interval for never-reviewed cards.
+        // Later reviews still use the FSRS memory state and interval calculation.
+        if (grade === 4 && state === 'new' && repetitions === 0) intervalMs = 86400000;
+      }
     } else if (state === 'review') {
       if (grade === 1) putOnStep(relearningSteps, 0, 'relearning');
       else graduate();
