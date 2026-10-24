@@ -328,6 +328,7 @@ class AIChatApp {
     this.isLoading = false;
     this.selectedText = "";
     this.currentTranslationSource = "";
+    this.lastTranslationResult = "";
     this.translationRequestVersion = 0;
     this.selectionTimeout = null;
     this.currentUtterance = null;
@@ -565,7 +566,11 @@ class AIChatApp {
     
     this.closeTranslationBtn.addEventListener("click", () => this.hidePopup(this.translationPopup));
     this.playTranslationAudioBtn.addEventListener("click", () => this.playTranslationAudio());
-    this.retryTranslationBtn?.addEventListener("click", () => this.refreshTranslation());
+    this.retryTranslationBtn?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.refreshTranslation();
+    });
     this.translationPopup.addEventListener("click", (e) => { if (e.target === this.translationPopup) this.hidePopup(this.translationPopup); });
 
     this.messagesDiv.addEventListener("click", (e) => {
@@ -3495,79 +3500,115 @@ Be thorough and comprehensive.`;
   playLeitnerCardAudio() { if (this.currentCard) { this.playTextToSpeech(this.currentCard.word, this.leitnerPlayAudioBtn, null, null); } }
   playTranslationAudio() { const text = this.originalTextEl.textContent; if (text) { this.playTextToSpeech(text, this.playTranslationAudioBtn, null, null); } }
 
-  async translateText(text) {
-    // Follow the selected chat provider exactly. The local-provider runtime
-    // overrides the OpenRouter-named route with the configured local LLM, so
-    // it must not be skipped merely because no cloud API key is stored.
-    if (this.chatProvider === 'avalai') return this.translateTextAvalai(text);
-    if (this.chatProvider === 'openrouter') return this.translateTextOpenRouter(text);
-    return this.translateTextGemini(text);
+  buildTranslationPrompt(text, options = {}) {
+    const sourceText = String(text ?? '').trim();
+    if (!options.refresh) {
+      return `Translate this text to Persian/Farsi. Provide only the translation without any additional explanation: "${sourceText}"`;
+    }
+    const previous = String(options.previousTranslation ?? '').trim();
+    const retryInstruction = options.forceAlternative
+      ? 'The previous attempt repeated the same wording. Produce a genuinely different but accurate Persian/Farsi translation using another natural phrasing.'
+      : 'This is a fresh translation request. Produce a natural alternative phrasing instead of repeating the previous translation.';
+    return [
+      'Translate the following source text into natural, accurate Persian/Farsi.',
+      'Return only the translation, without explanation, quotation marks, or commentary.',
+      retryInstruction,
+      previous ? `Do not repeat this previous translation verbatim: "${previous}"` : '',
+      `Source text: "${sourceText}"`,
+      `Request reference: ${options.requestId || Date.now()}`
+    ].filter(Boolean).join('\n');
   }
 
-  async translateTextOpenRouter(text) {
-    if (!this.OPENROUTER_API_KEY) return `Translation requires API key.`;
-    const prompt = `Translate this text to Persian/Farsi. Provide only the translation without any additional explanation: "${text}"`;
+  async translateText(text, options = {}) {
+    // Follow the selected provider exactly. The local-provider runtime
+    // overrides the OpenRouter-named route with the configured local LLM.
+    if (this.chatProvider === 'avalai') return this.translateTextAvalai(text, options);
+    if (this.chatProvider === 'openrouter') return this.translateTextOpenRouter(text, options);
+    return this.translateTextGemini(text, options);
+  }
+
+  async translateTextOpenRouter(text, options = {}) {
+    if (!this.OPENROUTER_API_KEY) throw new Error('OpenRouter API key is not set in Settings.');
+    const prompt = this.buildTranslationPrompt(text, options);
     try {
       const headers = {
         'Authorization': `Bearer ${this.OPENROUTER_API_KEY}`,
         'Content-Type': 'application/json'
       };
-      if (typeof location !== 'undefined' && location.origin && location.origin !== 'null') {
-        headers['HTTP-Referer'] = location.origin;
-      }
-      if (typeof document !== 'undefined' && document.title) {
-        headers['X-Title'] = document.title;
-      }
-
+      if (typeof location !== 'undefined' && location.origin && location.origin !== 'null') headers['HTTP-Referer'] = location.origin;
+      if (typeof document !== 'undefined' && document.title) headers['X-Title'] = document.title;
       const response = await fetch('/local-api/chat/completions', {
         method: 'POST',
         headers,
+        cache: 'no-store',
         body: JSON.stringify({
           model: 'gemma-4-e2b-it',
           messages: [{ role: 'user', content: prompt }],
+          temperature: options.forceAlternative ? 0.95 : options.refresh ? 0.8 : 0.2,
           provider: { data_collection: 'allow' }
         })
       });
-      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      if (!response.ok) throw new Error(`API Error: ${response.status} - ${await response.text()}`);
       const data = await response.json();
-      return data.choices?.[0]?.message?.content || "Translation failed";
+      const translation = data.choices?.[0]?.message?.content;
+      if (!String(translation || '').trim()) throw new Error('The translation API returned an empty response.');
+      return translation;
     } catch (error) {
-      console.error("Translation error (OpenRouter):", error);
-      return "Translation failed";
+      console.error('Translation error (OpenRouter/local provider):', error);
+      throw error;
     }
   }
 
-  async translateTextGemini(text) {
-    if (!this.API_KEY) return `Translation requires API key.`;
-    const prompt = `Translate this text to Persian/Farsi. Provide only the translation without any additional explanation: "${text}"`;
+  async translateTextGemini(text, options = {}) {
+    if (!this.API_KEY) throw new Error('Gemini API key is not set in Settings.');
+    const prompt = this.buildTranslationPrompt(text, options);
     try {
-      const modelName = "gemini-2.5-flash-lite";
+      const modelName = 'gemini-2.5-flash-lite';
+      const generationConfig = options.refresh
+        ? { temperature: options.forceAlternative ? 0.95 : 0.8 }
+        : undefined;
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${this.API_KEY}`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }] })
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig
+        })
       });
-      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      if (!response.ok) throw new Error(`Gemini API error: ${response.status} - ${await response.text()}`);
       const data = await response.json();
-      return data.candidates?.[0]?.content?.parts?.[0]?.text || "Translation failed";
+      const translation = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!String(translation || '').trim()) throw new Error('Gemini returned an empty translation.');
+      return translation;
     } catch (error) {
-      console.error("Translation error:", error);
-      return "Translation failed";
+      console.error('Translation error (Gemini):', error);
+      throw error;
     }
   }
 
-  async translateTextAvalai(text) {
-    if (!this.AVALAI_API_KEY) return `Translation requires API key.`;
-    const prompt = `Translate this text to Persian/Farsi. Provide only the translation without any additional explanation: "${text}"`;
+  async translateTextAvalai(text, options = {}) {
+    if (!this.AVALAI_API_KEY) throw new Error('Avalai API key is not set in Settings.');
+    const prompt = this.buildTranslationPrompt(text, options);
     try {
       const response = await fetch('https://api.avalai.ir/v1/chat/completions', {
-        method: 'POST', headers: { 'Authorization': `Bearer ${this.AVALAI_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: "gpt-5-nano", messages: [{ role: "user", content: prompt }] })
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${this.AVALAI_API_KEY}`, 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({
+          model: 'gpt-5-nano',
+          messages: [{ role: 'user', content: prompt }],
+          temperature: options.forceAlternative ? 0.95 : options.refresh ? 0.8 : 0.2
+        })
       });
-      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      if (!response.ok) throw new Error(`Avalai API error: ${response.status} - ${await response.text()}`);
       const data = await response.json();
-      return data.choices?.[0]?.message?.content || "Translation failed";
+      const translation = data.choices?.[0]?.message?.content;
+      if (!String(translation || '').trim()) throw new Error('Avalai returned an empty translation.');
+      return translation;
     } catch (error) {
-      console.error("Translation error (Provider 2):", error);
-      return "Translation failed";
+      console.error('Translation error (Avalai):', error);
+      throw error;
     }
   }
 
@@ -3630,6 +3671,7 @@ Be thorough and comprehensive.`;
     const sourceText = String(text ?? "").trim();
     if (!sourceText) return;
 
+    if (sourceText !== this.currentTranslationSource) this.lastTranslationResult = '';
     this.currentTranslationSource = sourceText;
     this.originalTextEl.textContent = sourceText;
     this.showPopup(this.translationPopup);
@@ -3637,38 +3679,63 @@ Be thorough and comprehensive.`;
   }
 
   async refreshTranslation() {
-    const sourceText = String(this.currentTranslationSource || this.originalTextEl?.textContent || "").trim();
-    if (!sourceText) return;
-    // Translation does not use a local result cache: this makes a new provider request.
-    await this.loadTranslationIntoPopup(sourceText, true);
+    const sourceText = String(this.currentTranslationSource || this.originalTextEl?.textContent || '').trim();
+    if (!sourceText) {
+      this.showToast('There is no selected text to translate again.', 'warning');
+      return;
+    }
+    const previousTranslation = String(this.lastTranslationResult || '').trim();
+    await this.loadTranslationIntoPopup(sourceText, true, previousTranslation);
   }
 
-  async loadTranslationIntoPopup(sourceText, isRefresh = false) {
+  async loadTranslationIntoPopup(sourceText, isRefresh = false, previousTranslation = '') {
+    const normalizedSource = String(sourceText ?? '').trim();
+    if (!normalizedSource) return;
     const requestVersion = ++this.translationRequestVersion;
     const refreshButton = this.retryTranslationBtn;
+    const requestId = `${Date.now()}-${requestVersion}-${Math.random().toString(36).slice(2, 8)}`;
+    const options = { refresh: isRefresh, previousTranslation, requestId };
 
     if (refreshButton) {
       refreshButton.disabled = true;
-      refreshButton.setAttribute("aria-busy", "true");
-      refreshButton.classList.add("is-loading");
-      refreshButton.title = isRefresh ? "Refreshing translation…" : "Translation in progress…";
+      refreshButton.setAttribute('aria-busy', 'true');
+      refreshButton.classList.add('is-loading');
+      refreshButton.title = isRefresh ? 'Generating an alternative translation…' : 'Translation in progress…';
     }
-    this.translatedTextEl.textContent = isRefresh ? "Generating a new translation…" : "Translating…";
+    this.translatedTextEl.textContent = isRefresh ? 'Generating a new translation…' : 'Translating…';
 
     try {
-      const translation = await this.translateText(sourceText);
+      let translation = await this.translateText(normalizedSource, options);
       if (requestVersion !== this.translationRequestVersion) return;
-      this.translatedTextEl.textContent = String(translation ?? "Translation failed");
+      let cleanTranslation = String(translation ?? '').trim();
+
+      // If a model repeats the previous wording on refresh, make one more
+      // provider call with a stronger alternative-phrasing instruction.
+      if (isRefresh && cleanTranslation && previousTranslation &&
+          cleanTranslation.replace(/\s+/g, ' ') === previousTranslation.replace(/\s+/g, ' ')) {
+        translation = await this.translateText(normalizedSource, {
+          ...options,
+          forceAlternative: true,
+          requestId: requestId + '-alternative'
+        });
+        if (requestVersion !== this.translationRequestVersion) return;
+        cleanTranslation = String(translation ?? '').trim();
+      }
+
+      if (!cleanTranslation) throw new Error('The translation provider returned an empty response.');
+      this.lastTranslationResult = cleanTranslation;
+      this.translatedTextEl.textContent = cleanTranslation;
     } catch (error) {
       if (requestVersion !== this.translationRequestVersion) return;
-      console.error("Failed to generate translation:", error);
-      this.translatedTextEl.textContent = error?.message || "Translation failed";
+      console.error('Failed to generate translation:', error);
+      this.translatedTextEl.textContent = 'Translation failed: ' + (error?.message || String(error));
+      this.showToast('Could not regenerate translation: ' + (error?.message || String(error)), 'error');
     } finally {
       if (requestVersion === this.translationRequestVersion && refreshButton) {
         refreshButton.disabled = false;
-        refreshButton.removeAttribute("aria-busy");
-        refreshButton.classList.remove("is-loading");
-        refreshButton.title = "Generate translation again";
+        refreshButton.removeAttribute('aria-busy');
+        refreshButton.classList.remove('is-loading');
+        refreshButton.title = 'Generate a different translation';
       }
     }
   }
