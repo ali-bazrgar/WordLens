@@ -7,7 +7,7 @@ import ipaddress
 from urllib.parse import urlparse
 
 PORT = int(os.environ.get("WORDLENS_PORT", "8000"))
-LLM_BASE = os.environ.get("WORDLENS_LLM_BASE", "http://127.0.0.1:1234").rstrip("/")
+LLM_BASE = os.environ.get("WORDLENS_LLM_BASE", "http://127.0.0.1:8080").rstrip("/")
 TTS_BASE = os.environ.get("WORDLENS_TTS_BASE", "http://127.0.0.1:4321").rstrip("/")
 # Leave empty until the local OpenAI-compatible STT endpoint is known.
 STT_BASE = os.environ.get("WORDLENS_STT_BASE", "").rstrip("/")
