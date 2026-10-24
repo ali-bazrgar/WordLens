@@ -122,6 +122,55 @@
     return blob;
   };
 
+  // Normalize browser microphone captures to the format most local Whisper servers accept.
+  const toMonoWav16k = async (audioBlob) => {
+    if (/^audio\/(?:x-)?wav(?:;|$)/i.test(audioBlob.type || '')) return audioBlob;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    const OfflineContextClass = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!AudioContextClass || !OfflineContextClass) return audioBlob;
+
+    const context = new AudioContextClass();
+    try {
+      const decoded = await context.decodeAudioData(await audioBlob.arrayBuffer());
+      const sampleRate = 16000;
+      const frameCount = Math.max(1, Math.ceil(decoded.duration * sampleRate));
+      const offline = new OfflineContextClass(1, frameCount, sampleRate);
+      const source = offline.createBufferSource();
+      source.buffer = decoded;
+      source.connect(offline.destination);
+      source.start(0);
+      const rendered = await offline.startRendering();
+      const samples = rendered.getChannelData(0);
+      const wavBuffer = new ArrayBuffer(44 + samples.length * 2);
+      const view = new DataView(wavBuffer);
+      const writeText = (offset, value) => {
+        for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
+      };
+      writeText(0, 'RIFF');
+      view.setUint32(4, 36 + samples.length * 2, true);
+      writeText(8, 'WAVE');
+      writeText(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeText(36, 'data');
+      view.setUint32(40, samples.length * 2, true);
+      for (let i = 0; i < samples.length; i++) {
+        const value = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(44 + i * 2, value < 0 ? value * 0x8000 : value * 0x7fff, true);
+      }
+      return new Blob([wavBuffer], { type: 'audio/wav' });
+    } catch (error) {
+      throw new Error('Could not convert microphone audio to WAV for local STT: ' + (error?.message || String(error)));
+    } finally {
+      if (context.state !== 'closed') await context.close().catch(() => {});
+    }
+  };
+
   const localSTT = async (audioBlob, app) => {
     if (!(audioBlob instanceof Blob) || audioBlob.size === 0) throw new Error('No recorded audio was captured.');
     const provider = getCfg('sttProvider');
@@ -129,23 +178,66 @@
     const base = isAvalai ? 'https://api.avalai.ir/v1' : requestBase('sttBase');
     const apiKey = isAvalai ? (app?.AVALAI_API_KEY || '') : getCfg('sttApiKey');
     if (isAvalai && !apiKey) throw new Error('Avalai STT is selected but its API key is not set in Settings.');
-    const formData = new FormData();
-    const mimeType = (audioBlob.type || '').toLowerCase();
-    const extension = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('wav') ? 'wav' : (mimeType.includes('mp4') ? 'm4a' : 'webm');
-    formData.append('file', audioBlob, 'recording.' + extension);
-    formData.append('model', getCfg('sttModel') || 'whisper-1');
+
+    // Browser MediaRecorder typically produces WebM/Opus. Whisper.cpp handles WAV
+    // reliably unless its optional FFmpeg conversion is enabled.
+    const uploadBlob = isAvalai ? audioBlob : await toMonoWav16k(audioBlob);
+    const mimeType = (uploadBlob.type || '').toLowerCase();
+    const extension = mimeType.includes('wav') ? 'wav' : mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'm4a' : 'webm';
     const language = getCfg('sttLanguage');
-    if (language && language.toLowerCase() !== 'auto') formData.append('language', language);
-    formData.append('response_format', 'json');
     const headers = { 'Accept': 'application/json' };
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
-    const response = await fetch(base + '/audio/transcriptions', { method: 'POST', headers, body: formData });
-    if (!response.ok) { const errorText = await response.text(); throw new Error('OpenAI-compatible STT API error: ' + response.status + ', ' + errorText); }
-    const data = await response.json();
-    const transcript = typeof data?.text === 'string' ? data.text : typeof data?.transcription === 'string' ? data.transcription : typeof data?.result?.text === 'string' ? data.result.text : '';
-    if (!transcript.trim()) throw new Error('STT API returned an empty transcript.');
-    return transcript.trim();
+    const createForm = (includeModel) => {
+      const form = new FormData();
+      form.append('file', uploadBlob, 'recording.' + extension);
+      if (includeModel) form.append('model', getCfg('sttModel') || 'whisper-1');
+      if (language && language.toLowerCase() !== 'auto') form.append('language', language);
+      form.append('response_format', 'json');
+      return form;
+    };
+    const send = (url, includeModel = true) => fetch(url, {
+      method: 'POST',
+      headers,
+      body: createForm(includeModel)
+    });
+    const readTranscript = async (response) => {
+      const responseText = await response.text();
+      let data;
+      try { data = JSON.parse(responseText); } catch (_) { data = { text: responseText }; }
+      const transcript = typeof data?.text === 'string' ? data.text
+        : typeof data?.transcription === 'string' ? data.transcription
+        : typeof data?.result?.text === 'string' ? data.result.text : '';
+      if (!transcript.trim()) throw new Error('STT API returned an empty transcript.');
+      return transcript.trim();
+    };
+
+    const response = await send(base + '/audio/transcriptions');
+    if (response.ok) return readTranscript(response);
+    const errorText = await response.text();
+
+    // whisper.cpp's server defaults to /inference (configurable with --inference-path).
+    // Try that native endpoint only when the OpenAI-compatible route is unavailable
+    // or rejects the request format; do not mask other provider errors.
+    const supportsNativeFallback = !isAvalai && (
+      response.status === 404 || response.status === 405 ||
+      (response.status === 400 && /invalid request|no .file. field|failed to read audio/i.test(errorText))
+    );
+    if (supportsNativeFallback) {
+      const apiMode = getCfg('apiMode');
+      const nativeRoot = apiMode === 'direct'
+        ? normalizeBase(getCfg('sttBase')).replace(/\/v1$/i, '')
+        : '/local-api';
+      const nativeResponse = await send(nativeRoot + '/inference', false);
+      if (nativeResponse.ok) return readTranscript(nativeResponse);
+      const nativeError = await nativeResponse.text();
+      throw new Error(
+        'STT request failed at the OpenAI-compatible endpoint (' + response.status + ': ' + errorText +
+        ') and whisper.cpp /inference fallback (' + nativeResponse.status + ': ' + nativeError + ').'
+      );
+    }
+    throw new Error('OpenAI-compatible STT API error: ' + response.status + ', ' + errorText);
   };
+
 
   const playLocalBlob = async (app, audioBlob, button, progressBar) => {
     if (!audioBlob || !audioBlob.size) throw new Error('Empty local audio blob.');
@@ -242,7 +334,7 @@
       <select id="local-stt-provider" class="settings-select"><option value="openai-compatible">OpenAI-compatible STT (local)</option><option value="avalai">Avalai Whisper API</option></select>
       <label style="display:block;margin:8px 0 4px;">STT API Base URL</label>
       <input type="text" id="local-stt-base-url" placeholder="http://127.0.0.1:PORT or .../v1">
-      <small style="color:#666;display:block;margin-top:4px;">Upstream address sent to <code>/v1/audio/transcriptions</code>. Enter the real STT API address; no port is guessed.</small>
+      <small style="color:#666;display:block;margin-top:4px;">Uses <code>/v1/audio/transcriptions</code> first and can fall back to whisper.cpp <code>/inference</code>. Browser recordings are normalized to 16 kHz mono WAV for local STT.</small>
       <label style="display:block;margin:8px 0 4px;">STT API Key (optional for local endpoints)</label>
       <input type="password" id="local-stt-api-key" placeholder="Bearer token, if required">
       <label style="display:block;margin:8px 0 4px;">STT Model</label>
