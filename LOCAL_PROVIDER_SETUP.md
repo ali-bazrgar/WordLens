@@ -45,7 +45,11 @@ Choose **Direct API — CORS required** if the app is served somewhere other tha
 
 The headset button next to the original microphone button toggles hands-free, pause-detected turn-taking: microphone → STT → the selected chat LLM → TTS playback → listen again. The original microphone button still records a one-shot clip and inserts its transcript in the message field.
 
-Open or create a chat first, allow microphone access, and use HTTPS or localhost. Before opening the microphone, Live Conversation checks the local proxy, LLM/TTS health, and whether an STT URL is configured; it displays a specific error rather than silently appearing not to work.
+Open or create a chat first and allow microphone access. Browsers require a secure context for microphone capture. Prefer HTTPS with a trusted certificate; for a temporary local-LAN test in Chrome, the private IP origin may need to be explicitly treated as secure in `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, followed by a browser relaunch. This flag relaxes security protections and should only be used for your trusted local WordLens server.
+
+When WordLens is opened from a private LAN address (for example, `http://192.168.x.x:8000`), the app forces API requests through that host's `/local-api` proxy. It does not call `127.0.0.1` from the phone, because that would refer to the phone itself. Upstream LLM/TTS/STT Base URLs are loaded from the WordLens server and are read-only on a remote phone; edit them on the PC running `server.py`. Model IDs and language preferences may still be stored locally on the phone.
+
+Before opening the microphone, Live Conversation checks the local proxy, LLM/TTS health, and whether an STT URL is configured; transcription errors identify the failed request and include LAN connectivity guidance when applicable.
 
 If the button is visible but not responding, hard-refresh the page and check that `local-provider-runtime.js` is loaded successfully in the browser's Network panel. The page loads this file explicitly; the Python server no longer appends it to `app.js`, which prevents missing or duplicate event bindings.
 
