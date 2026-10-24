@@ -3418,7 +3418,7 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
     const prompt = `English–Persian learner dictionary. Be brief, precise and headword-specific.
 TARGET: ${JSON.stringify(String(word ?? "").trim())}
 Return one JSON object with exactly: meanings, synonyms, antonyms.
-meanings: 1–4 common distinct senses as warranted; each item is {"text":"Persian-script translation","type":"short Persian part of speech"}. Every meaning text MUST be Persian, not an English definition.
+meanings: 1–4 common distinct senses as warranted; each item has text containing an actual Persian translation in Persian script and type containing a short Persian part-of-speech label. Do not put an English definition in the meaning text.
 synonyms: 2–3 useful English synonyms or near-synonyms for the main sense.
 antonyms: 1–3 common English opposites if a meaningful opposite exists; use [] only when no reasonable opposite exists.
 Related terms must be English only. No duplicate items, labels, explanations, Markdown or extra keys.
@@ -3467,7 +3467,7 @@ ${forceRefresh ? "Reassess the word independently; accuracy matters more than no
     const prompt = `English–Persian learner dictionary. Be brief, precise and headword-specific.
 TARGET: ${JSON.stringify(String(word ?? "").trim())}
 Return one JSON object with exactly: meanings, synonyms, antonyms.
-meanings: 1–4 common distinct senses as warranted; each item is {"text":"Persian-script translation","type":"short Persian part of speech"}. Every meaning text MUST be Persian, not an English definition.
+meanings: 1–4 common distinct senses as warranted; each item has text containing an actual Persian translation in Persian script and type containing a short Persian part-of-speech label. Do not put an English definition in the meaning text.
 synonyms: 2–3 useful English synonyms or near-synonyms for the main sense.
 antonyms: 1–3 common English opposites if a meaningful opposite exists; use [] only when no reasonable opposite exists.
 Related terms must be English only. No duplicate items, labels, explanations, Markdown or extra keys.
