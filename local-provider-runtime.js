@@ -211,7 +211,7 @@
   const localCompletion = async (messages, extra = {}, options = {}) => {
     const base = requestBase('llmBase');
     const model = getCfg('llmModel') || DEFAULTS.llmModel;
-    const headers = { 'Content-Type': 'application/json', 'Accept': options.stream ? 'text/event-stream, application/json' : 'application/json' };
+    const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
     const apiKey = getCfg('llmApiKey');
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
     const parentSignal = options?.signal;
@@ -224,12 +224,10 @@
     let response;
     let responseText;
     try {
-      const payload = { model, messages, ...extra };
-      if (options.stream) payload.stream = true;
       response = await fetchWithNetworkDiagnostics(base + '/chat/completions', {
         method: 'POST',
         headers,
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ model, messages, ...extra }),
         signal: controller.signal,
         cache: 'no-store'
       }, 'LLM');
@@ -250,21 +248,6 @@
     }
     if (!response.ok) {
       throw new Error('OpenAI-compatible LLM API error: ' + response.status + ', ' + responseText);
-    }
-    if (options.stream) {
-      let streamedContent = '';
-      for (const line of responseText.split(/\r?\n/)) {
-        const match = line.match(/^data:\s*(.*)$/);
-        if (!match || match[1] === '[DONE]') continue;
-        let event;
-        try { event = JSON.parse(match[1]); } catch (_) { continue; }
-        if (event?.error) throw new Error(event.error.message || 'Local LLM streaming request failed.');
-        const delta = event?.choices?.[0]?.delta?.content;
-        if (typeof delta === 'string') streamedContent += delta;
-        else if (Array.isArray(delta)) streamedContent += delta.map(part => typeof part === 'string' ? part : (part?.text || '')).join('');
-      }
-      if (!streamedContent.trim()) throw new Error('OpenAI-compatible LLM returned no content in its streaming response.');
-      return streamedContent;
     }
     let data;
     try { data = JSON.parse(responseText); }
@@ -453,6 +436,25 @@
       }
     };
 
+    const NON_SPEECH_TRANSCRIPTS = new Set([
+      'blank audio','blank audio detected','blank_audio','silence','silent','no speech','inaudible',
+      'unintelligible','unintelligible speech','keyboard','keyboard typing','keyboard clicking',
+      'typing','typing sound','sound of typing','sound of keyboard','the sound of typing',
+      'the sound of a keyboard','cough','coughing','a cough','someone coughing','sigh','sighing',
+      'laugh','laughing','laughter','breathing','heavy breathing','background noise','noise',
+      'static','music','applause','footsteps','door closing','door opening','beeping','beep',
+      'صدای کیبورد','کیبورد','سرفه','صدای سرفه','سکوت','صدای پس زمینه','صدای پس‌زمینه'
+    ]);
+    const isNonSpeechTranscript = (value) => {
+      const normalized = String(value ?? '').toLowerCase().normalize('NFKC')
+        .replace(/[\[\](){}]/g, ' ')
+        .replace(/[_\-–—]+/g, ' ')
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .replace(/\s+/g, ' ').trim();
+      if (!normalized) return true;
+      if (NON_SPEECH_TRANSCRIPTS.has(normalized)) return true;
+      return /^(?:(?:the )?sound of )?(?:a )?(?:blank audio|silence|no speech|background noise|keyboard(?: typing| clicking)?|typing(?: sound)?|cough(?:ing)?|sigh(?:ing)?|laugh(?:ing|ter)?|heavy breathing|static|applause|footsteps|beep(?:ing)?)$/.test(normalized);
+    };
     const readTranscript = (responseText) => {
       let data;
       try { data = JSON.parse(String(responseText ?? '').trim()); }
@@ -462,8 +464,12 @@
         : typeof data?.result?.text === 'string' ? data.result.text
         : Array.isArray(data?.segments) ? data.segments.map(part => part?.text || '').join(' ')
         : '';
-      if (!transcript.trim()) throw new Error('STT API returned an empty transcript. Check the selected language and speak clearly.');
-      return transcript.trim();
+      const cleanTranscript = transcript.trim();
+      if (!cleanTranscript || isNonSpeechTranscript(cleanTranscript)) return '';
+      const scoredSegments = Array.isArray(data?.segments)
+        ? data.segments.filter(segment => Number.isFinite(Number(segment?.no_speech_prob))) : [];
+      if (scoredSegments.length && scoredSegments.every(segment => Number(segment.no_speech_prob) >= 0.78)) return '';
+      return cleanTranscript;
     };
 
     let nativeError = '';
@@ -1129,48 +1135,22 @@
     for (const type of types) { try { if (MediaRecorder.isTypeSupported(type)) { selected = type; break; } } catch (_) {} }
     return selected ? new MediaRecorder(stream,{mimeType:selected}) : new MediaRecorder(stream);
   };
-  const beginRealtimeSegmentRecorder = (app, session, now) => {
-    const recorder = makeRealtimeRecorder(session.stream);
-    const capturedChunks = [];
-    recorder.wordLensDiscarded = false;
-    session.recorder = recorder;
-    session.chunks = capturedChunks;
-    session.speechStartedAt = now;
-    session.lastVoiceAt = now;
-    session.discardRecorder = null;
-    recorder.ondataavailable = event => {
-      if (event.data?.size && !recorder.wordLensDiscarded) capturedChunks.push(event.data);
-    };
-    recorder.onerror = event => {
-      console.error('Realtime recorder error:', event.error || event);
-      realtimeSetStatus(app, 'Microphone capture error. Stop and restart if it continues.', 'error');
-    };
-    recorder.onstop = () => {
-      const discarded = recorder.wordLensDiscarded;
-      const chunks = discarded ? [] : capturedChunks.slice();
-      if (session.recorder === recorder) {
-        session.recorder = null;
-        session.chunks = [];
-      }
-      if (session.discardRecorder === recorder) session.discardRecorder = null;
-      if (!session.active || discarded) return;
-      const blob = new Blob(chunks, { type: recorder.mimeType || chunks[0]?.type || 'audio/webm' });
-      if (!blob.size) {
-        session.state = 'listening';
-        realtimeSetStatus(app, 'No audio captured; listening again…', 'listening');
-        return;
-      }
-      session.state = 'processing';
-      realtimeSetStatus(app, 'Transcribing your turn…', 'processing');
-      app.processRealtimeAudio(blob, session);
-    };
-    recorder.start(100);
-    return recorder;
+  // This turn-based experience does not support barge-in. Muting the capture
+  // track while the reply is played prevents phone loudspeaker audio from
+  // becoming the next "user" turn, even when mobile AEC is ineffective.
+  const setRealtimeMicMuted = (session, muted) => {
+    if (!session?.stream) return;
+    session.micMuted = !!muted;
+    session.stream.getAudioTracks().forEach(track => {
+      if (track.readyState === 'live') track.enabled = !muted;
+    });
   };
   const playRealtimeAudio = async (blob, session) => {
     if (!blob || !blob.size) throw new Error('TTS returned an empty audio file.');
 
-    // Prefer the AudioContext already unlocked by the user's realtime-button tap.
+    // Prefer the AudioContext already unlocked by the user's headset-button tap.
+    // This is more reliable on mobile browsers than starting a fresh media element
+    // after asynchronous STT/LLM requests have completed.
     const context = session?.audioContext;
     if (context && context.state !== 'closed' && typeof context.decodeAudioData === 'function') {
       try {
@@ -1223,10 +1203,7 @@
         };
         const onEnded = () => finish();
         const onError = () => finish(new Error('The browser could not play the TTS audio.'));
-        session.audioStop = () => {
-          try { audio.pause(); audio.currentTime = 0; } catch (_) {}
-          finish();
-        };
+        session.audioStop = () => finish();
         audio.addEventListener('ended', onEnded, { once: true });
         audio.addEventListener('error', onError, { once: true });
       });
@@ -1320,7 +1297,7 @@
         const Context=window.AudioContext||window.webkitAudioContext;if(!Context)throw new Error('Web Audio is not supported by this browser.');
         audioContext=new Context();await audioContext.resume();const analyser=audioContext.createAnalyser();analyser.fftSize=2048;analyser.smoothingTimeConstant=0.15;
         const source=audioContext.createMediaStreamSource(stream);source.connect(analyser);
-        const session={active:true,stream,audioContext,analyser,source,frameId:0,recorder:null,chunks:[],state:'listening',noiseFloor:0.002,threshold:0.012,speechStartedAt:0,lastVoiceAt:0,audio:null,audioStop:null,turnController:null,turnSequence:0,bargeCandidateAt:0,bargeCandidateLastVoiceAt:0,bargeResumeState:'',bargeCandidatePromise:null,resolveBargeCandidate:null,discardRecorder:null};
+        const session={active:true,stream,audioContext,analyser,source,frameId:0,recorder:null,chunks:[],state:'listening',noiseFloor:0.002,threshold:0.012,speechStartedAt:0,lastVoiceAt:0,voiceActiveMs:0,lastVADFrameAt:0,audio:null,audioStop:null,micMuted:false,turnController:null};
         this.realtimeSession=session;
         if(this.realtimeBtn){this.realtimeBtn.disabled=false;this.realtimeBtn.classList.add('active');this.realtimeBtn.setAttribute('aria-pressed','true');this.realtimeBtn.title='Stop live conversation';this.realtimeBtn.setAttribute('aria-label','Stop live conversation');}
         if(this.voiceBtn)this.voiceBtn.disabled=true;realtimeSetStatus(this,'Listening — speak naturally, then pause briefly when you finish a turn.','listening');this.tickRealtimeConversation(session);
@@ -1330,7 +1307,6 @@
     };
     AIChatApp.prototype.stopRealtimeConversation=function(){
       const session=this.realtimeSession;if(!session)return;session.active=false;if(session.frameId)cancelAnimationFrame(session.frameId);
-      if(session.resolveBargeCandidate){const resolveCandidate=session.resolveBargeCandidate;session.resolveBargeCandidate=null;session.bargeCandidatePromise=null;resolveCandidate(true);}
       if(session.turnController&&!session.turnController.signal.aborted)session.turnController.abort();
       if(session.recorder&&session.recorder.state!=='inactive'){try{session.recorder.stop();}catch(_){}}
       if(session.audio){try{session.audio.pause();session.audio.currentTime=0;}catch(_){}if(session.audioStop)session.audioStop();}
@@ -1344,155 +1320,82 @@
         const samples=new Float32Array(session.analyser.fftSize);session.analyser.getFloatTimeDomainData(samples);let squares=0;
         for(let i=0;i<samples.length;i++)squares+=samples[i]*samples[i];
         const rms=Math.sqrt(squares/samples.length),now=performance.now();
-        const resumeState=session.state==='barge-candidate'?session.bargeResumeState:session.state;
-        const isAssistantWorking=this.isLoading&&['thinking','synthesizing','speaking'].includes(session.state);
-        if(isAssistantWorking){
-          const bargeThreshold=resumeState==='speaking'?Math.max(0.028,session.threshold*2.0):Math.max(0.010,session.threshold*0.9);
-          if(rms>bargeThreshold){
-            if(session.state!=='barge-candidate'){
-              try{
-                session.bargeResumeState=session.state;
-                session.bargeCandidateAt=now;
-                session.bargeCandidateLastVoiceAt=now;
-                beginRealtimeSegmentRecorder(this,session,now);
-                session.bargeCandidatePromise=new Promise(resolve=>{session.resolveBargeCandidate=resolve;});
-                session.state='barge-candidate';
-                realtimeSetStatus(this,'Listening for an interruption…','processing');
-              }catch(error){
-                session.bargeCandidateAt=0;
-                console.error('Could not start interruption capture:',error);
-              }
-            }else session.bargeCandidateLastVoiceAt=now;
-          }
-        }else if(session.state==='barge-candidate'){
-          const bargeThreshold=session.bargeResumeState==='speaking'?Math.max(0.028,session.threshold*2.0):Math.max(0.010,session.threshold*0.9);
-          if(rms>bargeThreshold)session.bargeCandidateLastVoiceAt=now;
-          const candidateAge=now-session.bargeCandidateAt;
-          const voiceGap=now-session.bargeCandidateLastVoiceAt;
-          if(candidateAge>=260&&voiceGap<=160){
-            session.state='recording';
-            session.bargeCandidateAt=0;
-            if(session.turnController&&!session.turnController.signal.aborted)session.turnController.abort();
-            if(session.audioStop)session.audioStop();
-            const resolveCandidate=session.resolveBargeCandidate;
-            session.resolveBargeCandidate=null;session.bargeCandidatePromise=null;
-            if(resolveCandidate)resolveCandidate(true);
-            realtimeSetStatus(this,'Interrupted — recording your turn…','recording');
-          }else if(voiceGap>180){
-            const recorder=session.recorder;
-            if(recorder&&recorder.state!=='inactive'){
-              recorder.wordLensDiscarded=true;
-              session.discardRecorder=recorder;
-              if(session.recorder===recorder)session.chunks=[];
-              try{recorder.stop();}catch(_){}
-            }
-            session.state=session.bargeResumeState||'listening';
-            session.bargeCandidateAt=0;
-            session.bargeCandidateLastVoiceAt=0;
-            const resolveCandidate=session.resolveBargeCandidate;
-            session.resolveBargeCandidate=null;session.bargeCandidatePromise=null;
-            if(resolveCandidate)resolveCandidate(false);
-            if(session.state==='speaking')realtimeSetStatus(this,'Speaking… talk to interrupt.','speaking');
-            else realtimeSetStatus(this,session.state==='thinking'?'Thinking…':'Preparing speech…','processing');
-          }
-        }else if(session.state==='listening'&&!this.isLoading){
-          session.noiseFloor=rms<session.noiseFloor*3?session.noiseFloor*0.96+rms*0.04:session.noiseFloor;
-          session.threshold=Math.max(0.012,session.noiseFloor*3.2);
+        const frameDelta=Math.min(40,Math.max(0,now-(session.lastVADFrameAt||now)));
+        session.lastVADFrameAt=now;
+        if(session.state==='listening'&&!this.isLoading){
+          session.noiseFloor=rms<session.noiseFloor*3?session.noiseFloor*0.96+rms*0.04:session.noiseFloor;session.threshold=Math.max(0.012,session.noiseFloor*3.2);
           if(rms>session.threshold){
             try{
-              beginRealtimeSegmentRecorder(this,session,now);
-              session.state='recording';
-              realtimeSetStatus(this,'Recording your turn… pause when you finish speaking.','recording');
-            }catch(error){
-              console.error('Could not start realtime audio segment:',error);
-              realtimeSetStatus(this,'Microphone recording failed: '+error.message,'error');
-            }
+              const recorder=makeRealtimeRecorder(session.stream);session.recorder=recorder;session.chunks=[];session.speechStartedAt=now;session.lastVoiceAt=now;session.voiceActiveMs=frameDelta;
+              recorder.ondataavailable=event=>{if(event.data?.size)session.chunks.push(event.data);};
+              recorder.onerror=event=>{console.error('Realtime recorder error:',event.error||event);realtimeSetStatus(this,'Microphone capture error. Stop and restart if it continues.','error');};
+              recorder.onstop=()=>{
+                const chunks=session.chunks.slice();session.chunks=[];if(session.recorder===recorder)session.recorder=null;if(!session.active)return;
+                const activeMs=session.voiceActiveMs||0;
+                if(activeMs<220){session.state='listening';realtimeSetStatus(this,'Listening — ignoring a short noise.','listening');return;}
+                const blob=new Blob(chunks,{type:recorder.mimeType||chunks[0]?.type||'audio/webm'});
+                if(!blob.size){session.state='listening';realtimeSetStatus(this,'Listening — no usable audio captured.','listening');return;}
+                session.state='processing';this.processRealtimeAudio(blob,session);
+              };
+              recorder.start(250);session.state='recording';realtimeSetStatus(this,'Recording your turn… pause when you finish speaking.','recording');
+            }catch(error){console.error('Could not start realtime audio segment:',error);realtimeSetStatus(this,'Microphone recording failed: '+error.message,'error');}
           }
         }else if(session.state==='recording'){
-          if(rms>session.threshold)session.lastVoiceAt=now;
+          if(rms>session.threshold){session.lastVoiceAt=now;session.voiceActiveMs=(session.voiceActiveMs||0)+frameDelta;}
           const duration=now-session.speechStartedAt;
-          if((duration>650&&now-session.lastVoiceAt>850)||duration>18000){
-            session.state='processing';
-            realtimeSetStatus(this,'Transcribing your turn…','processing');
-            const recorder=session.recorder;
-            if(recorder&&recorder.state!=='inactive')recorder.stop();
-          }
+          if((duration>650&&now-session.lastVoiceAt>850)||duration>18000){session.state='processing';realtimeSetStatus(this,'Transcribing your turn…','processing');const recorder=session.recorder;if(recorder&&recorder.state!=='inactive')recorder.stop();}
         }
       }catch(error){console.error('Realtime voice activity detection error:',error);}
       if(session.active)session.frameId=requestAnimationFrame(()=>this.tickRealtimeConversation(session));
     };
     AIChatApp.prototype.processRealtimeAudio=async function(audioBlob,session){
       let failed=false;
-      try{
-        realtimeSetStatus(this,'Transcribing your turn…','processing');
-        const transcript=await localSTT(audioBlob,this);
-        if(!session.active||this.realtimeSession!==session||!transcript)return;
-        await this.processRealtimeTurn(transcript,session);
-      }catch(error){
-        failed=true;
-        if(error?.name==='AbortError'&&!session.active)return;
-        console.error('Realtime STT/turn processing failed:',error);
-        if(session.active){realtimeSetStatus(this,'Voice turn failed: '+error.message,'error');this.showToast('Live conversation error: '+error.message,'error');}
-      }finally{
-        if(session.active&&this.realtimeSession===session&&session.state==='processing'){
-          session.state='listening';
-          if(session.lastError){realtimeSetStatus(this,session.lastError,'error');session.lastError='';}
-          else if(!failed)realtimeSetStatus(this,'Listening — speak when ready.','listening');
-        }
-      }
+      try{realtimeSetStatus(this,'Transcribing your turn…','processing');const transcript=await localSTT(audioBlob,this);if(!session.active||this.realtimeSession!==session||!transcript)return;await this.processRealtimeTurn(transcript,session);}
+      catch(error){failed=true;console.error('Realtime STT/turn processing failed:',error);if(session.active){realtimeSetStatus(this,'Voice turn failed: '+error.message,'error');this.showToast('Live conversation error: '+error.message,'error');}}
+      finally{if(session.active&&this.realtimeSession===session){session.state='listening';if(session.lastError){realtimeSetStatus(this,session.lastError,'error');session.lastError='';}else if(!failed)realtimeSetStatus(this,'Listening — speak when ready.','listening');}}
     };
     AIChatApp.prototype.processRealtimeTurn=async function(transcript,session){
       if(!this.currentChatId||!session.active||this.realtimeSession!==session||this.isLoading)return;
-      const controller=new AbortController();
-      session.turnController=controller;
-      session.turnSequence=(session.turnSequence||0)+1;
-      this.addMessage('user',transcript);
-      const loadingWrapper=document.createElement('div');loadingWrapper.className='message-wrapper ai';
+      const controller=new AbortController();session.turnController=controller;
+      this.addMessage('user',transcript);const loadingWrapper=document.createElement('div');loadingWrapper.className='message-wrapper ai';
       const loadingDiv=document.createElement('div');loadingDiv.className='message ai';loadingDiv.innerHTML='<div class="typing-indicator"><span></span><span></span><span></span></div>';
       loadingWrapper.appendChild(loadingDiv);this.messagesDiv.appendChild(loadingWrapper);this.scrollToBottom();this.isLoading=true;
       try{
-        session.state='thinking';
         realtimeSetStatus(this,'Thinking…','processing');
         const answer=this.chatProvider==='openrouter'
-          ? await this.callOpenRouterChatAPI(transcript,{signal:controller.signal,stream:true})
+          ? await this.callOpenRouterChatAPI(transcript,{signal:controller.signal})
           : await this.callChatAPI(transcript);
-        if(session.state==='barge-candidate'&&session.bargeCandidatePromise)await session.bargeCandidatePromise;
-        if(!session.active||this.realtimeSession!==session||controller.signal.aborted||['barge-candidate','recording'].includes(session.state)){
-          loadingWrapper.remove();
-          return;
-        }
+        if(!session.active||controller.signal.aborted){loadingWrapper.remove();return;}
         loadingWrapper.remove();this.addMessage('ai',answer);
         const chat=this.chats.find(item=>item.id===this.currentChatId);
         if(chat&&chat.messages.length===2&&!String(chat.title||'').includes('(Imported)')){chat.title=transcript.substring(0,30)+(transcript.length>30?'...':'');this.saveChats();this.renderChatList();this.chatTitle.textContent=chat.title;}
-        if(session.active&&this.realtimeSession===session&&answer.trim()){
-          session.state='synthesizing';
-          realtimeSetStatus(this,'Preparing speech…','processing');
-          const audioBlob=await localTTS(answer,{signal:controller.signal});
-          if(session.state==='barge-candidate'&&session.bargeCandidatePromise)await session.bargeCandidatePromise;
-          if(!session.active||this.realtimeSession!==session||controller.signal.aborted||['barge-candidate','recording'].includes(session.state))return;
-          session.state='speaking';
-          realtimeSetStatus(this,'Speaking — talk to interrupt.','speaking');
-          await playRealtimeAudio(audioBlob,session);
+        if(session.active&&this.realtimeSession===session&&answer.trim()){realtimeSetStatus(this,'Speaking…','speaking');
+          try{
+            const audioBlob=await localTTS(answer,{signal:controller.signal});
+            if(session.active&&this.realtimeSession===session){
+              // The app is half-duplex: don't record the phone's own speaker.
+              setRealtimeMicMuted(session,true);
+              try{await playRealtimeAudio(audioBlob,session);}
+              finally{
+                // Keep the capture track disabled during playback and briefly
+                // afterward so the phone speaker's acoustic tail cannot trigger VAD.
+                await new Promise(resolve=>setTimeout(resolve,500));
+                setRealtimeMicMuted(session,false);
+              }
+            }
+          }
+          catch(ttsError){console.error('Realtime TTS error:',ttsError);session.lastError='Reply is in chat, but speech failed: '+ttsError.message;if(session.active){realtimeSetStatus(this,session.lastError,'error');this.showToast('Live TTS failed: '+ttsError.message,'error');}}
         }
       }catch(error){
         loadingWrapper.remove();
-        const bargedIn=['barge-candidate','recording'].includes(session.state);
-        if((controller.signal.aborted||error?.name==='AbortError')&&(!session.active||bargedIn)){
-          // Expected cancellation: stop was pressed or the user interrupted us.
-        }else{
-          console.error('Realtime LLM/TTS error:',error);
-          this.addMessage('ai','Error: '+error.message);
-          session.lastError='LLM/TTS error: '+error.message;
-          if(session.active){realtimeSetStatus(this,session.lastError,'error');this.showToast(session.lastError,'error');}
-        }
-      }finally{
+        if((controller.signal.aborted||error?.name==='AbortError')&&!session.active){return;}
+        console.error('Realtime LLM error:',error);this.addMessage('ai','Error: '+error.message);session.lastError='LLM error: '+error.message;if(session.active){realtimeSetStatus(this,session.lastError,'error');this.showToast(session.lastError,'error');}
+      }
+      finally{
         if(session.turnController===controller)session.turnController=null;
         this.isLoading=false;
-        if(session.active&&this.realtimeSession===session&&!['recording','barge-candidate','processing'].includes(session.state)){
-          session.state='listening';
-          if(session.lastError){realtimeSetStatus(this,session.lastError,'error');session.lastError='';}
-          else realtimeSetStatus(this,'Listening — speak when ready.','listening');
-        }
+        // If a typed message was queued while live speech was being processed,
+        // flush it here too (the normal sendMessage path has its own finally).
         if(this._sendQueuedAfterCurrent&&this.messageInput?.value.trim()&&this.currentChatId){
           this._sendQueuedAfterCurrent=false;
           setTimeout(()=>this.sendMessage(),0);
