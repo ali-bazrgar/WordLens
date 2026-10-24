@@ -2015,14 +2015,16 @@ body.theme-dark .card-meaning-type {
 /* Responsive Design */
 @media (max-width: 768px) {
   body {
-    /* Fix for iOS Safari viewport height with keyboard */
+    /* Retain older mobile fallbacks, then track the visible viewport when supported. */
     height: 100vh;
     height: -webkit-fill-available;
+    height: 100dvh;
   }
   
   #app {
     height: 100vh;
     height: -webkit-fill-available;
+    height: 100dvh;
   }
   
   .sidebar { 
