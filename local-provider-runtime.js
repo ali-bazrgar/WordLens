@@ -967,6 +967,53 @@
       }
     };
 
+    const stripPersianMeaningLabels = (value) => {
+      let text = String(value ?? '').trim();
+      const labelPattern = /^(?:(?:معنی|ترجمه)(?:\s+فارسی)?(?:\s+(?:اول|دوم|سوم|چهارم|پنجم|ششم|هفتم|هشتم|نهم|دهم|[0-9۰-۹]+))?|فارسی)\s*[:：]\s*/u;
+      let previous;
+      do {
+        previous = text;
+        text = text.replace(labelPattern, '').trim();
+      } while (text !== previous);
+      return text;
+    };
+
+    // Clean model responses from every provider, including older cached values.
+    if (!AIChatApp.prototype.__wordLensMeaningLabelsCleaned &&
+        typeof AIChatApp.prototype.getWordMeaning === 'function') {
+      const originalGetWordMeaning = AIChatApp.prototype.getWordMeaning;
+      AIChatApp.prototype.getWordMeaning = async function(word, options = {}) {
+        const result = await originalGetWordMeaning.call(this, word, options);
+        if (!result || !Array.isArray(result.meanings)) return result;
+        let changed = false;
+        const meanings = result.meanings.map(item => {
+          if (typeof item === 'string') {
+            const text = stripPersianMeaningLabels(item);
+            if (text !== item) changed = true;
+            return text ? text : null;
+          }
+          if (!item || typeof item !== 'object' || String(item.type ?? '').toLowerCase() === 'error') return item;
+          const oldText = String(item.text ?? '');
+          const text = stripPersianMeaningLabels(oldText);
+          if (text !== oldText) changed = true;
+          return text ? { ...item, text } : null;
+        }).filter(Boolean);
+        const cleaned = { ...result, meanings };
+        if (changed) {
+          const key = String(word ?? '').trim().toLowerCase();
+          if (key && this.db?.set) {
+            await this.db.set('word_meanings', { word: key, value: cleaned }).catch(error => {
+              console.debug('Could not update cleaned word-meaning cache:', error);
+            });
+          }
+        }
+        return cleaned;
+      };
+      Object.defineProperty(AIChatApp.prototype, '__wordLensMeaningLabelsCleaned', {
+        value: true, configurable: false, enumerable: false, writable: false
+      });
+    }
+
     AIChatApp.prototype.getWordMeaningOpenRouter = async function(word, { forceRefresh = false } = {}) {
       const lowerWord = String(word ?? '').toLowerCase().trim();
       if (!lowerWord) {
@@ -1000,6 +1047,7 @@
               type: String(item?.type ?? item?.part_of_speech ?? '').trim()
             };
           })
+          .map(item => ({ ...item, text: stripPersianMeaningLabels(item.text) }))
           .filter(item => item.text && item.type.toLowerCase() !== 'error')
           .filter(item => !/^(?:local provider 3 error|failed to parse meaning|request failed)/i.test(item.text))
           .slice(0, 5);
@@ -1078,9 +1126,10 @@
               'PREVIOUS RESULT (comparison reference only): ' + JSON.stringify(previousCachedResult || null) + '\n\n'
             : '') +
           'Return one JSON object only, with exactly these keys and no other text:\n' +
-          '{"meanings":[{"text":"معنی فارسی","type":"اسم/فعل/صفت/قید/حرف اضافه/حرف ربط/حرف ندا"},{"text":"معنی فارسی دوم","type":"نوع کلمه"}],"synonyms":["English synonym"],"antonyms":["English antonym"]}\n\n' +
+          '{"meanings":[{"text":"خوشحال، شاد","type":"صفت"},{"text":"راضی، خشنود","type":"صفت"}],"synonyms":["English synonym"],"antonyms":["English antonym"]}\n\n' +
           'Rules (must follow):\n' +
           '- meanings must contain 1 to 5 items, sorted from the most common/current meaning to less common meanings.\n' +
+          '- Each meaning.text must contain only the Persian gloss. Never prefix it with labels such as معنی فارسی:, معنی فارسی اول:, معنی فارسی دوم: or ترجمه:.\n' +
           '- Each meaning.text must be Persian/Farsi. Do not write English explanations in meanings.\n' +
           '- Each meaning.type must be a short Persian part-of-speech label.\n' +
           '- synonyms must contain at most 3 distinct English words or short English phrases, closest matches first.\n' +
