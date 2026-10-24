@@ -2200,9 +2200,20 @@ class AIChatApp {
   pcmToWav(pcmData, sampleRate) { const numChannels = 1, bitsPerSample = 16; const blockAlign = (numChannels * bitsPerSample) >> 3; const byteRate = sampleRate * blockAlign; const dataSize = pcmData.length * (bitsPerSample >> 3); const buffer = new ArrayBuffer(44 + dataSize); const view = new DataView(buffer); this._writeString(view, 0, 'RIFF'); view.setUint32(4, 36 + dataSize, true); this._writeString(view, 8, 'WAVE'); this._writeString(view, 12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, numChannels, true); view.setUint32(24, sampleRate, true); view.setUint32(28, byteRate, true); view.setUint16(32, blockAlign, true); view.setUint16(34, bitsPerSample, true); this._writeString(view, 36, 'data'); view.setUint32(40, dataSize, true); let offset = 44; for (let i = 0; i < pcmData.length; i++, offset += 2) { view.setInt16(offset, pcmData[i], true); } return new Blob([view], { type: 'audio/wav' }); }
   _writeString(view, offset, string) { for (let i = 0; i < string.length; i++) { view.setUint8(offset + i, string.charCodeAt(i)); } }
 
-  async playAudio(audioBlob, button, progressBar) {
+  getTTSPlaybackRate(spokenText) {
+    const text = String(spokenText ?? "").trim();
+    if (!text) return 1;
+    const tokenCount = text.split(/\s+/).filter(Boolean).length;
+    // Word/short-phrase pronunciation should be deliberate; keep full messages natural.
+    return tokenCount <= 2 && text.length <= 64 ? 0.78 : 1;
+  }
+
+  async playAudio(audioBlob, button, progressBar, spokenText = "") {
     const audioUrl = URL.createObjectURL(audioBlob);
     const audio = new Audio(audioUrl);
+    audio.playbackRate = this.getTTSPlaybackRate(spokenText);
+    try { audio.preservesPitch = true; } catch (_) {}
+    try { audio.webkitPreservesPitch = true; } catch (_) {}
     button.disabled = true;
     button.classList.add("playing");
     audio.addEventListener("timeupdate", () => {
@@ -2236,7 +2247,7 @@ class AIChatApp {
     try {
       const cachedAudio = await this.db.get('audio_cache', text);
       if (cachedAudio && cachedAudio.value) {
-        await this.playAudio(cachedAudio.value, button, progressBar);
+        await this.playAudio(cachedAudio.value, button, progressBar, text);
         return;
       }
     } catch (err) {
@@ -2349,7 +2360,7 @@ class AIChatApp {
         throw new Error(`ElevenLabs TTS API error: ${response.status} ${errorText}`);
       }
       const audioBlob = await response.blob();
-      await this.playAudio(audioBlob, button, progressBar);
+      await this.playAudio(audioBlob, button, progressBar, text);
       await this.db.set('audio_cache', { text: text, value: audioBlob }).catch(err => console.error("Failed to cache audio:", err));
     } catch (error) {
       console.error("ElevenLabs TTS Error:", error);
@@ -2383,7 +2394,7 @@ class AIChatApp {
       });
       if (!response.ok) throw new Error(`Provider 2 TTS API error: ${response.status} ${response.statusText}`);
       const audioBlob = await response.blob();
-      await this.playAudio(audioBlob, button, progressBar);
+      await this.playAudio(audioBlob, button, progressBar, text);
       await this.db.set('audio_cache', { text: text, value: audioBlob }).catch(err => console.error("Failed to cache audio:", err));
     } catch (error) {
       console.error("Provider 2 TTS Error:", error);
@@ -2426,7 +2437,7 @@ class AIChatApp {
       const pcmDataBuffer = this.base64ToArrayBuffer(audioData);
       const pcm16 = new Int16Array(pcmDataBuffer);
       const wavBlob = this.pcmToWav(pcm16, sampleRate);
-      await this.playAudio(wavBlob, button, progressBar);
+      await this.playAudio(wavBlob, button, progressBar, text);
       await this.db.set('audio_cache', { text: text, value: wavBlob }).catch(err => console.error("Failed to cache audio:", err));
     } catch (error) {
       console.error("Provider 1 TTS Error:", error);
@@ -2443,7 +2454,7 @@ class AIChatApp {
       const utterance = new SpeechSynthesisUtterance(text);
       this.currentUtterance = utterance;
       utterance.lang = /[\u0600-\u06FF]/.test(text) ? 'fa-IR' : 'en-US';
-      utterance.rate = 1.0; utterance.pitch = 1.0;
+      utterance.rate = this.getTTSPlaybackRate(text); utterance.pitch = 1.0;
       let lastHighlightedIndex = -1;
       utterance.onboundary = (event) => {
         if (event.name === 'word') {
@@ -2802,6 +2813,7 @@ class AIChatApp {
       "Reply in the same language as the user's latest message unless the user asks for another language.",
       "Honor the requested content type, tone, format, and length. If the user asks for a long essay, story, article, comprehensive explanation, or a specific word/page count, provide a genuinely substantial answer rather than a few short paragraphs. Do not arbitrarily shorten a requested long response.",
       "Use valid, renderable CommonMark Markdown for structured answers. Put a space after Markdown heading markers, for example '# Hello' and '## Introduction'; leave blank lines around headings, lists, block quotes, and fenced code blocks; use '- ' for unordered list items; and format tables with a valid header and separator row.",
+      "For multi-part answers, start with the direct answer and use descriptive ##/### headings, short paragraphs, numbered steps for procedures, bullets for options, tables only for genuine comparisons, and fenced code blocks for code. Avoid giant unbroken paragraphs, excessive headings in short answers, and Markdown that is malformed or escaped as plain text.",
       "Write actual Markdown syntax, not HTML-encoded spaces such as '&#x20;' and not backslash-escaped heading or list markers. Do not wrap ordinary answers in a code fence. Only provide raw Markdown source when explicitly requested.",
       "Keep simple answers appropriately concise, but never let concision override a clear request for depth or length. If a response is legitimately cut off by a platform limit, make that clear rather than pretending the answer is complete."
     ].join("\n");
@@ -2990,6 +3002,7 @@ class AIChatApp {
     }
 
     const prompt = `You are an expert English-Persian dictionary. Analyze the word "${word}" comprehensively.
+${forceRefresh ? "This is an explicit refresh request. Re-evaluate the word independently and prefer a genuinely useful alternative Persian gloss/order when it remains accurate. Never invent senses just to be different." : ""}
 
 CRITICAL REQUIREMENTS:
 1. Find ALL possible meanings (at least 3-5 common ones), ordered from MOST COMMON to LEAST COMMON usage
@@ -3037,7 +3050,7 @@ Be thorough and comprehensive.`;
           model: 'gemma-4-e2b-it',
           messages: [{ role: 'user', content: prompt }],
           provider: { data_collection: 'allow' },
-          temperature: 0.3
+          temperature: forceRefresh ? 0.7 : 0.3
         })
       });
       if (!response.ok) {
