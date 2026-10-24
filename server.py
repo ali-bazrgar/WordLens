@@ -107,12 +107,16 @@ class WordLensHandler(SimpleHTTPRequestHandler):
 
     def _serve_proxy_config(self, body=None):
         global LLM_BASE, TTS_BASE, STT_BASE
-        if not self._is_loopback_client():
-            self._send_json_error(403, "API configuration may only be changed from this computer (localhost).")
-            return
 
+        # Remote devices on the LAN need to read the upstream addresses so the
+        # mobile UI can verify proxy mode. These values contain no API secrets.
+        # Only loopback clients may write/update the host machine's configuration.
         if self.command == "GET":
             self._send_json(200, {"llm_base": LLM_BASE, "tts_base": TTS_BASE, "stt_base": STT_BASE})
+            return
+
+        if not self._is_loopback_client():
+            self._send_json_error(403, "API configuration may only be changed from this computer (localhost).")
             return
 
         try:
