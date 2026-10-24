@@ -3158,8 +3158,8 @@ CRITICAL REQUIREMENTS:
 OUTPUT FORMAT (strict JSON):
 {
   "meanings": [
-    {"text": "رایج‌ترین معنی فارسی", "type": "نوع کلمه به فارسی"},
-    {"text": "معنی دوم", "type": "نوع کلمه"}
+    {"text": "خوشحال، شاد", "type": "صفت"},
+    {"text": "راضی، خشنود", "type": "صفت"}
   ],
   "synonyms": ["ENGLISH_WORD_1", "ENGLISH_WORD_2"],
   "antonyms": ["ENGLISH_WORD_1", "ENGLISH_WORD_2"]
@@ -3170,7 +3170,7 @@ Type options: اسم, فعل, صفت, قید, حرف ندا, حرف ربط, حر
 IMPORTANT OUTPUT RULES:
 - Return ONLY valid JSON (no markdown, no code fences, no extra text).
 - Use double quotes for all JSON keys/strings.
-- Meanings MUST be in Persian/Farsi.
+- Meanings MUST be in Persian/Farsi. Each meanings[].text must contain only the gloss itself, with no heading or label. Never prefix a meaning with "معنی فارسی:", "معنی فارسی اول:", "معنی فارسی دوم:" or "ترجمه:".
 - Synonyms and antonyms MUST be English words ONLY (Latin alphabet). Do NOT return Persian words in synonyms/antonyms.
 
 Be thorough and comprehensive.`;
@@ -3328,8 +3328,8 @@ CRITICAL REQUIREMENTS:
 OUTPUT FORMAT (strict JSON):
 {
   "meanings": [
-    {"text": "رایج‌ترین معنی فارسی", "type": "نوع کلمه به فارسی"},
-    {"text": "معنی دوم", "type": "نوع کلمه"},
+    {"text": "خوشحال، شاد", "type": "صفت"},
+    {"text": "راضی، خشنود", "type": "صفت"},
     ...more from common to rare...
   ],
   "synonyms": ["most_similar", "very_similar", "similar", "somewhat_similar", ...],
@@ -3337,6 +3337,8 @@ OUTPUT FORMAT (strict JSON):
 }
 
 Type options: اسم, فعل, صفت, قید, حرف ندا, حرف ربط, حرف اضافه
+
+Formatting rule: each meanings[].text must contain only the Persian gloss, never a heading or label. Do not prefix it with "معنی فارسی:", "معنی فارسی اول:", "معنی فارسی دوم:" or "ترجمه:". The example below is only a JSON-format illustration; answer for the requested word, not the example word.
 
 Example for "happy":
 {
@@ -3401,8 +3403,8 @@ CRITICAL REQUIREMENTS:
 OUTPUT FORMAT (strict JSON):
 {
   "meanings": [
-    {"text": "رایج‌ترین معنی فارسی", "type": "نوع کلمه به فارسی"},
-    {"text": "معنی دوم", "type": "نوع کلمه"},
+    {"text": "خوشحال، شاد", "type": "صفت"},
+    {"text": "راضی، خشنود", "type": "صفت"},
     ...more from common to rare...
   ],
   "synonyms": ["most_similar", "very_similar", "similar", "somewhat_similar", ...],
@@ -3410,6 +3412,8 @@ OUTPUT FORMAT (strict JSON):
 }
 
 Type options: اسم, فعل, صفت, قید, حرف ندا, حرف ربط, حرف اضافه
+
+Formatting rule: each meanings[].text must contain only the Persian gloss, never a heading or label. Do not prefix it with "معنی فارسی:", "معنی فارسی اول:", "معنی فارسی دوم:" or "ترجمه:". The example below is only a JSON-format illustration; answer for the requested word, not the example word.
 
 Example for "happy":
 {
