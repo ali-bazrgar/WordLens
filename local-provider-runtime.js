@@ -31,9 +31,16 @@
 
   const normalizeBase = (value) => (value || '').trim().replace(/\/+$/, '');
 
+  // Accept either a server root URL or an already-versioned /v1 URL.
+  // The same-origin /local-api proxy has its own route and must not gain /v1.
+  const normalizeApiBase = (value) => {
+    const base = normalizeBase(value);
+    if (!base || /\/local-api$/i.test(base) || /\/v1$/i.test(base)) return base;
+    return base + '/v1';
+  };
 
   const localCompletion = async (messages, extra = {}) => {
-    const base = normalizeBase(getCfg('llmBase')) || DEFAULTS.llmBase;
+    const base = normalizeApiBase(getCfg('llmBase') || DEFAULTS.llmBase);
     const model = getCfg('llmModel') || DEFAULTS.llmModel;
     const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
     const apiKey = getCfg('llmApiKey');
@@ -52,7 +59,7 @@
   };
 
   const localTTS = async (text) => {
-    const base = normalizeBase(getCfg('ttsBase')) || DEFAULTS.ttsBase;
+    const base = normalizeApiBase(getCfg('ttsBase') || DEFAULTS.ttsBase);
     const headers = { 'Content-Type': 'application/json', 'Accept': 'audio/*, application/octet-stream' };
     const apiKey = getCfg('ttsApiKey');
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
@@ -73,7 +80,7 @@
     if (!(audioBlob instanceof Blob) || audioBlob.size === 0) throw new Error('No recorded audio was captured.');
     const provider = getCfg('sttProvider');
     const isAvalai = provider === 'avalai';
-    const base = isAvalai ? 'https://api.avalai.ir/v1' : (normalizeBase(getCfg('sttBase')) || DEFAULTS.sttBase);
+    const base = isAvalai ? 'https://api.avalai.ir/v1' : normalizeApiBase(getCfg('sttBase') || DEFAULTS.sttBase);
     const apiKey = isAvalai ? (app?.AVALAI_API_KEY || '') : getCfg('sttApiKey');
     if (isAvalai && !apiKey) throw new Error('Avalai STT is selected but its API key is not set in Settings.');
     const formData = new FormData();
@@ -157,16 +164,20 @@
     section.className = 'setting-section';
     section.id = 'local-provider-settings';
     section.innerHTML = `
-      <p><b>Provider 3 — OpenAI-compatible APIs</b></p>
-      <small style="color:#666;display:block;margin-bottom:8px;">Configure LLM, TTS and STT endpoints. Use /local-api for the same-origin proxy, or a direct base URL ending in /v1.</small>
-      <label style="display:block;margin:6px 0 4px;">LLM API Base URL</label>
-      <input type="text" id="local-llm-base-url" placeholder="/local-api or http://127.0.0.1:8080/v1">
+      <p><b>Provider 3 — API Connections</b></p>
+      <small style="color:#666;display:block;margin-bottom:8px;">Set each service's Base URL, model ID and optional API key here. A URL can end at the server root or /v1; the app normalizes it automatically. Use /local-api when running WordLens via server.py.</small>
+      <p style="margin:14px 0 4px;font-weight:700;">1. LLM — Chat, translation and dictionary</p>
+      <label style="display:block;margin:6px 0 4px;">LLM Base URL</label>
+      <input type="text" id="local-llm-base-url" placeholder="/local-api or http://127.0.0.1:8080">
+      <small style="color:#666;display:block;margin-top:4px;">Endpoint used for chat/completions. Example: http://127.0.0.1:8080 or http://127.0.0.1:8080/v1.</small>
       <label style="display:block;margin:8px 0 4px;">LLM Model</label>
       <input type="text" id="local-llm-model" placeholder="Model ID from /v1/models">
       <label style="display:block;margin:8px 0 4px;">LLM API Key (optional)</label>
       <input type="password" id="local-llm-api-key" placeholder="Bearer token, if required">
-      <label style="display:block;margin:8px 0 4px;">TTS API Base URL</label>
-      <input type="text" id="local-tts-base-url" placeholder="/local-api or http://127.0.0.1:PORT/v1">
+      <p style="margin:14px 0 4px;font-weight:700;">2. TTS — Spoken replies</p>
+      <label style="display:block;margin:8px 0 4px;">TTS Base URL</label>
+      <input type="text" id="local-tts-base-url" placeholder="/local-api or http://127.0.0.1:PORT">
+      <small style="color:#666;display:block;margin-top:4px;">Endpoint used for audio/speech. Use your TTS server's API root or its /v1 URL.</small>
       <label style="display:block;margin:8px 0 4px;">TTS Model</label>
       <input type="text" id="local-tts-model" placeholder="kitten-tts-mini-0.8">
       <label style="display:block;margin:8px 0 4px;">TTS API Key (optional)</label>
@@ -175,18 +186,19 @@
       <input type="text" id="local-tts-voice" placeholder="expr-voice-4-m">
       <label style="display:block;margin:8px 0 4px;">TTS Response Format</label>
       <input type="text" id="local-tts-format" placeholder="wav">
+      <p style="margin:14px 0 4px;font-weight:700;">3. STT — Transcription and live conversation</p>
       <label style="display:block;margin:8px 0 4px;">STT Provider</label>
       <select id="local-stt-provider" class="settings-select"><option value="openai-compatible">OpenAI-compatible STT (local)</option><option value="avalai">Avalai Whisper API</option></select>
       <label style="display:block;margin:8px 0 4px;">STT API Base URL</label>
-      <input type="text" id="local-stt-base-url" placeholder="/local-api or http://127.0.0.1:PORT/v1">
-      <small style="color:#666;display:block;margin-top:4px;">For /local-api, set WORDLENS_STT_BASE before starting server.py. Use the actual port of your STT service.</small>
+      <input type="text" id="local-stt-base-url" placeholder="/local-api or http://127.0.0.1:PORT">
+      <small style="color:#666;display:block;margin-top:4px;">When using /local-api, set WORDLENS_STT_BASE before starting server.py. For direct URLs, the server root or /v1 are both accepted (CORS must be allowed).</small>
       <label style="display:block;margin:8px 0 4px;">STT API Key (optional for local endpoints)</label>
       <input type="password" id="local-stt-api-key" placeholder="Bearer token, if required">
       <label style="display:block;margin:8px 0 4px;">STT Model</label>
       <input type="text" id="local-stt-model" placeholder="whisper-1">
       <label style="display:block;margin:8px 0 4px;">STT Language</label>
       <input type="text" id="local-stt-language" placeholder="en, fa, or auto">
-      <button type="button" id="local-provider-test" class="btn-secondary" style="margin-top:10px;">Test Local LLM + TTS</button>
+      <button type="button" id="local-provider-test" class="btn-secondary" style="margin-top:10px;">Test LLM + TTS connections</button>
       <div id="local-provider-status" style="margin-top:8px;font-size:12px;color:#666;"></div>
     `;
     scroll.appendChild(section);
