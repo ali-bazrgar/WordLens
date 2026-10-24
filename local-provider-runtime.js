@@ -113,7 +113,20 @@
     if (!isLanHostedClient() || !raw) return raw;
     try {
       const url = new URL(raw);
-      if (['localhost', '127.0.0.1', '::1'].includes(url.hostname.toLowerCase())) {
+      const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+      const loopback = ['localhost', '127.0.0.1', '::1'].includes(host);
+      const octets = host.split('.').map(Number);
+      const validIpv4 = octets.length === 4 && octets.every(part => Number.isInteger(part) && part >= 0 && part <= 255);
+      const privateIpv4 = validIpv4 && (
+        octets[0] === 10 ||
+        (octets[0] === 192 && octets[1] === 168) ||
+        (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+        (octets[0] === 169 && octets[1] === 254)
+      );
+      // All local AI services in this setup live on the same PC as WordLens.
+      // Replace stale loopback/private-IP values with the host from this page URL;
+      // this also adapts if the PC gets a different DHCP address.
+      if (loopback || privateIpv4) {
         url.hostname = window.location.hostname;
         return url.toString().replace(/\/$/, '');
       }
